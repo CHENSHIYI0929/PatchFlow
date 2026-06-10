@@ -35,6 +35,8 @@ def export_run_artifacts(
     stats = summarize_run(log)
     retrievals = _collect_retrievals(events)
     patches = _collect_patches(events, result.patch)
+    grading = _collect_grading(events)
+    materialized_manifest = _finalize_manifest(manifest, events)
 
     metrics = {
         **stats,
@@ -52,6 +54,8 @@ def export_run_artifacts(
         "graph_queries": sum(1 for item in retrievals if item.get("type") == "graph_neighbors"),
         "failure_type": result.failure_type,
         "failure_stage": result.failure_stage,
+        "grader": grading.get("grader"),
+        "grader_checks": grading.get("checks", []),
     }
     if metrics["patch_attempts"]:
         metrics["patch_success_rate"] = round(
@@ -65,8 +69,8 @@ def export_run_artifacts(
     _write_json(artifact_dir / "result.json", result.to_dict())
     _write_json(artifact_dir / "retrievals.json", retrievals)
     _write_json(artifact_dir / "patches.json", patches)
-    if manifest is not None:
-        _write_json(artifact_dir / "run_manifest.json", manifest)
+    if materialized_manifest is not None:
+        _write_json(artifact_dir / "run_manifest.json", materialized_manifest)
     if result.patch:
         (artifact_dir / "final_diff.patch").write_text(result.patch, encoding="utf-8")
 
@@ -171,6 +175,35 @@ def _collect_patches(events: list[dict[str, Any]], final_diff: str | None) -> li
             "error": None,
         })
     return patches
+
+
+def _collect_grading(events: list[dict[str, Any]]) -> dict[str, Any]:
+    for event in reversed(events):
+        if event["event_type"] != EventType.OBSERVATION.value:
+            continue
+        obs = event["payload"]["observation"]
+        if obs.get("tool_name") not in {"final_grader", "preflight_verify"}:
+            continue
+        metadata = obs.get("metadata") or {}
+        return {
+            "grader": metadata.get("grader"),
+            "checks": metadata.get("checks", []),
+        }
+    return {"grader": None, "checks": []}
+
+
+def _finalize_manifest(
+    manifest: dict[str, Any] | None,
+    events: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    if manifest is None:
+        return None
+
+    materialized = dict(manifest)
+    if events:
+        materialized.setdefault("run_started_at", events[0].get("timestamp"))
+        materialized.setdefault("run_finished_at", events[-1].get("timestamp"))
+    return materialized
 
 
 def _extract_path_from_output(output: str) -> str | None:

@@ -41,6 +41,7 @@ from llm.router import create_backend_from_config            # noqa: E402
 # 模块级 import（供 patch 使用）
 from config.schema import load_config, merge_cli_overrides  # noqa: E402
 from llm.router import create_backend_from_config           # noqa: E402
+from agent.failure import FAILURE_STAGE_GRADING, FAILURE_TYPE_VERIFICATION_FAILED  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -270,7 +271,7 @@ def _execute_run(
                     log.log_task_failed(
                         steps=result.steps_taken,
                         reason=failure_reason,
-                        failure_type="verification_failed",
+                        failure_type=grader_result.failure_type or "verification_failed",
                         failure_stage=grader_result.stage,
                         failure_message=grader_result.output or grader_result.message,
                     )
@@ -282,7 +283,7 @@ def _execute_run(
                         total_tokens=result.total_tokens,
                         patch=result.patch,
                         error=grader_result.message,
-                        failure_type="verification_failed",
+                        failure_type=grader_result.failure_type or "verification_failed",
                         failure_stage=grader_result.stage,
                         failure_message=grader_result.output or grader_result.message,
                     )
@@ -982,6 +983,8 @@ def _render_benchmark_compare_markdown(comparison: dict) -> str:
     right = comparison["right"]
     delta = comparison["delta"]
     right_runs = right.get("runs", [])
+    failure_types = right.get("failure_type_distribution", {})
+    failure_stages = right.get("failure_stage_distribution", {})
     return "\n".join(
         [
             "# Benchmark Compare",
@@ -1012,15 +1015,30 @@ def _render_benchmark_compare_markdown(comparison: dict) -> str:
             f"| Patch conflicts | {left['patch_conflicts']} | {right['patch_conflicts']} | {delta['patch_conflicts']:+.0f} |",
             f"| Patch reverts | {left['patch_reverts']} | {right['patch_reverts']} | {delta['patch_reverts']:+.0f} |",
             "",
+            "## Current Failure Types",
+            "",
+            "| Failure Type | Count |",
+            "| --- | ---: |",
+            *(f"| {name} | {count} |" for name, count in sorted(failure_types.items())),
+            *(["| - | 0 |"] if not failure_types else []),
+            "",
+            "## Current Failure Stages",
+            "",
+            "| Failure Stage | Count |",
+            "| --- | ---: |",
+            *(f"| {name} | {count} |" for name, count in sorted(failure_stages.items())),
+            *(["| - | 0 |"] if not failure_stages else []),
+            "",
             "## Current Run Results",
             "",
-            "| Task | Result | Failure Type | Failure Stage | Patch | Artifact |",
-            "| --- | --- | --- | --- | --- | --- |",
+            "| Task | Result | Failure Type | Failure Stage | Failure Message | Patch | Artifact |",
+            "| --- | --- | --- | --- | --- | --- | --- |",
             *[
                 f"| `{Path(item.get('task_file') or item.get('artifact_dir')).name}` | "
                 f"{'success' if item.get('task_success') else 'failed'} | "
                 f"{item.get('failure_type') or '-'} | "
                 f"{item.get('failure_stage') or '-'} | "
+                f"{_markdown_cell(item.get('failure_message'))} | "
                 f"{f'`{Path(item['patch_path']).name}`' if item.get('patch_path') else '-'} | "
                 f"`{Path(item['artifact_dir']).name}` |"
                 for item in right_runs
@@ -1081,8 +1099,8 @@ def _render_benchmark_summary_markdown(summary: dict) -> str:
             "",
             "## Task Results",
             "",
-            "| Task | Result | Steps | Tokens | Failure Type | Failure Stage | Patch | Artifact |",
-            "| --- | --- | ---: | ---: | --- | --- | --- | --- |",
+            "| Task | Result | Steps | Tokens | Failure Type | Failure Stage | Failure Message | Source Repo | Workspace Repo | Patch | Artifact |",
+            "| --- | --- | ---: | ---: | --- | --- | --- | --- | --- | --- | --- |",
             *[
                 f"| `{Path(item.get('task_file') or item.get('artifact_dir')).name}` | "
                 f"{'success' if item.get('task_success') else 'failed'} | "
@@ -1090,6 +1108,9 @@ def _render_benchmark_summary_markdown(summary: dict) -> str:
                 f"{item.get('total_tokens')} | "
                 f"{item.get('failure_type') or '-'} | "
                 f"{item.get('failure_stage') or '-'} | "
+                f"{_markdown_cell(item.get('failure_message'))} | "
+                f"{_markdown_path_cell(item.get('repo_source'))} | "
+                f"{_markdown_path_cell(item.get('workspace_repo'))} | "
                 f"{f'`{Path(item['patch_path']).name}`' if item.get('patch_path') else '-'} | "
                 f"`{Path(item['artifact_dir']).name}` |"
                 for item in summary.get("runs", [])
@@ -1097,6 +1118,19 @@ def _render_benchmark_summary_markdown(summary: dict) -> str:
             "",
         ]
     )
+
+
+def _markdown_cell(value: object) -> str:
+    if value is None:
+        return "-"
+    text = str(value).replace("\n", "<br>").replace("|", "\\|").strip()
+    return text or "-"
+
+
+def _markdown_path_cell(value: object) -> str:
+    if value is None:
+        return "-"
+    return f"`{_markdown_cell(value)}`"
 
 
 # ---------------------------------------------------------------------------

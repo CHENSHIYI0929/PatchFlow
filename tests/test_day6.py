@@ -387,6 +387,14 @@ class TestCliBenchmark:
             '"retrieval_match_count": 2, "patch_attempts": 1, "patch_successes": 1}',
             encoding="utf-8",
         )
+        (run_a / "result.json").write_text(
+            '{"task_id":"run-a","summary":"ok","failure_type":null,"failure_stage":null,"failure_message":null}',
+            encoding="utf-8",
+        )
+        (run_a / "run_manifest.json").write_text(
+            '{"repo_source":"/tmp/source","workspace_repo":"/tmp/workspace"}',
+            encoding="utf-8",
+        )
 
         runner = CliRunner()
         result = runner.invoke(
@@ -395,7 +403,10 @@ class TestCliBenchmark:
         )
         assert result.exit_code == 0, result.output
         assert report_path.exists()
-        assert "# Benchmark Summary" in report_path.read_text(encoding="utf-8")
+        text = report_path.read_text(encoding="utf-8")
+        assert "# Benchmark Summary" in text
+        assert "Source Repo" in text
+        assert "Workspace Repo" in text
 
     def test_benchmark_compare_outputs_delta(self, tmp_path):
         left_root = tmp_path / "left"
@@ -507,10 +518,18 @@ class TestCliBenchmark:
             '"retrieval_match_count": 5, "patch_attempts": 2, "patch_successes": 1}',
             encoding="utf-8",
         )
+        (left_run / "result.json").write_text(
+            '{"task_id":"run-a","failure_type":"verification_failed","failure_stage":"grading","failure_message":"lint failed"}',
+            encoding="utf-8",
+        )
         (right_run / "metrics.json").write_text(
             '{"task_success": true, "steps_taken": 4, "total_tokens": 120, '
             '"elapsed_seconds": 2.0, "tool_call_count": 3, "retrieval_queries": 1, '
             '"retrieval_match_count": 2, "patch_attempts": 1, "patch_successes": 1}',
+            encoding="utf-8",
+        )
+        (right_run / "result.json").write_text(
+            '{"task_id":"run-b","failure_type":"timeout","failure_stage":"grading","failure_message":"timed out"}',
             encoding="utf-8",
         )
 
@@ -526,7 +545,10 @@ class TestCliBenchmark:
         )
         assert result.exit_code == 0, result.output
         assert report_path.exists()
-        assert "# Benchmark Compare" in report_path.read_text(encoding="utf-8")
+        text = report_path.read_text(encoding="utf-8")
+        assert "# Benchmark Compare" in text
+        assert "Current Failure Types" in text
+        assert "Failure Message" in text
 
     def test_benchmark_run_executes_task_files(self, tmp_path):
         tasks_dir = tmp_path / "tasks"
@@ -635,6 +657,10 @@ class TestCliBenchmark:
         assert "logs/workspaces/task-a_" in captured_runs[0]["repo_path"]
         assert captured_runs[0]["manifest"]["workspace_repo"] == captured_runs[0]["repo_path"]
         assert captured_runs[0]["manifest"]["repo_source"] == str(tmp_path.resolve())
+        assert captured_runs[0]["manifest"]["run_started_at"] is None
+        assert captured_runs[0]["manifest"]["run_finished_at"] is None
+        assert captured_runs[0]["manifest"]["runtime_type"] == "local"
+        assert captured_runs[0]["manifest"]["sandbox_enabled"] is False
 
     def test_benchmark_patch_replay_applies_patch(self, tmp_path):
         repo = tmp_path / "repo"
@@ -862,6 +888,40 @@ class TestBenchmarkTaskSpecs:
         assert spec.finish_if_verified is False
         assert spec.max_steps == 9
         assert spec.description == "Fix the report bug"
+
+    def test_build_run_manifest_includes_runtime_metadata(self, tmp_path):
+        from agent.benchmark import build_run_manifest
+        from config.schema import AppConfig
+
+        manifest = build_run_manifest(
+            task_id="run-1",
+            task_file=None,
+            task_repo=tmp_path,
+            source_repo=tmp_path,
+            workspace_repo=tmp_path,
+            config=AppConfig(),
+            grader=None,
+            sandbox=False,
+        )
+
+        assert manifest["run_started_at"] is None
+        assert manifest["run_finished_at"] is None
+        assert manifest["runtime_type"] == "local"
+        assert manifest["sandbox_enabled"] is False
+        assert manifest["platform"]
+        assert manifest["python_version"]
+
+    def test_command_grader_timeout_is_classified(self, tmp_path):
+        from agent.grader import CommandGrader
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        grader = CommandGrader("test", "python -c \"import time; time.sleep(1.5)\"")
+        result = grader.run(repo, timeout=1)
+
+        assert result.success is False
+        assert result.failure_type == "timeout"
+        assert "timed out" in result.message.lower()
 
 
 class TestCliLog:

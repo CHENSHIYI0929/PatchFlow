@@ -583,6 +583,38 @@ class TestArtifactExport:
         result_payload = json.loads((artifact_dir / "result.json").read_text())
 
         assert manifest["run_id"] == "abc"
+        assert manifest["run_started_at"] is not None
+        assert manifest["run_finished_at"] is not None
         assert metrics["failure_type"] == "verification_failed"
         assert metrics["failure_stage"] == "grading"
         assert result_payload["failure_message"] == "lint failed"
+
+    def test_export_run_artifacts_captures_grader_checks(self, sample_task, tmp_log_dir):
+        with EventLog.create(sample_task, log_dir=str(tmp_log_dir)) as log:
+            log.log_task_start(sample_task)
+            log.log_observation(
+                step=1,
+                observation=Observation(
+                    status=ObservationStatus.SUCCESS,
+                    output="ok",
+                    tool_name="final_grader",
+                    metadata={
+                        "grader": {"name": "test", "type": "command"},
+                        "checks": [{"name": "test", "success": True}],
+                    },
+                ),
+            )
+            log.log_task_complete(steps=1, summary="done")
+
+        result = RunResult(
+            task_id=sample_task.task_id,
+            status=RunStatus.SUCCESS,
+            summary="done",
+            steps_taken=1,
+            total_tokens=5,
+        )
+        artifact_dir = export_run_artifacts(log, result, elapsed_seconds=0.5)
+
+        metrics = json.loads((artifact_dir / "metrics.json").read_text())
+        assert metrics["grader"] == {"name": "test", "type": "command"}
+        assert metrics["grader_checks"] == [{"name": "test", "success": True}]

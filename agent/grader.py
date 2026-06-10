@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from agent.failure import classify_command_failure
 from tools.runtime import LocalRuntime, Runtime
 
 
@@ -18,6 +19,7 @@ class GraderResult:
     name: str
     success: bool
     stage: str = "grading"
+    failure_type: str | None = None
     message: str = ""
     command: str | None = None
     output: str = ""
@@ -29,6 +31,7 @@ class GraderResult:
             "name": self.name,
             "success": self.success,
             "stage": self.stage,
+            "failure_type": self.failure_type,
             "message": self.message,
             "command": self.command,
             "output": self.output,
@@ -69,11 +72,13 @@ class CommandGrader(Grader):
         repo = Path(repo_path).resolve()
         result = exec_runtime.exec(self.command, cwd=str(repo), timeout=timeout)
         success = result.success
-        message = "passed" if success else f"failed with exit code {result.returncode}"
+        failure_type = None if success else _classify_command_failure(result.returncode, result.output)
+        message = "passed" if success else _build_failure_message(result.returncode, result.output)
         return GraderResult(
             name=self.name,
             success=success,
             stage="grading",
+            failure_type=failure_type,
             message=message,
             command=self.command,
             output=result.output.strip(),
@@ -82,6 +87,7 @@ class CommandGrader(Grader):
                 {
                     "name": self.name,
                     "success": success,
+                    "failure_type": failure_type,
                     "command": self.command,
                     "returncode": result.returncode,
                 }
@@ -118,6 +124,7 @@ class CompositeGrader(Grader):
                     name=self.name,
                     success=False,
                     stage=result.stage,
+                    failure_type=result.failure_type,
                     message=f"{grader.name}: {result.message}",
                     command=result.command,
                     output=result.output,
@@ -139,3 +146,14 @@ class CompositeGrader(Grader):
             "type": "composite",
             "checks": [grader.describe() for grader in self.graders],
         }
+
+
+def _classify_command_failure(returncode: int | None, output: str) -> str:
+    return classify_command_failure(returncode, output)
+
+
+def _build_failure_message(returncode: int | None, output: str) -> str:
+    text = output.strip()
+    if returncode == -1 and "timed out" in text.lower():
+        return text
+    return f"failed with exit code {returncode}"
