@@ -23,6 +23,7 @@ entry/cli.py
 from __future__ import annotations
 
 import logging
+import json
 import sys
 import time
 import uuid
@@ -171,6 +172,13 @@ def _execute_run(
     sandbox: bool,
     verbose: bool,
     show_banner: bool = True,
+    run_mode: str = "auto",
+    disable_failure_analyzer: bool = False,
+    disable_hybrid_retrieval: bool = False,
+    disable_edit_plan: bool = False,
+    disable_self_review: bool = False,
+    disable_long_memory: bool = False,
+    disable_compression: bool = False,
 ):
     """Shared run execution for `run` and benchmark batch mode."""
     if show_banner:
@@ -220,10 +228,16 @@ def _execute_run(
         max_steps=config.agent.max_steps,
         budget_tokens=config.agent.budget_tokens,
         history_max_messages=config.context.history_window * 2,
-        enable_context_compression=config.context.enable_compression,
-        enable_long_memory=config.context.enable_long_memory,
+        enable_context_compression=config.context.enable_compression and not disable_compression,
+        enable_long_memory=config.context.enable_long_memory and not disable_long_memory,
         long_memory_limit=config.context.long_memory_limit,
         log_dir=config.agent.log_dir,
+        run_mode=run_mode,
+        failure_analyzer_enabled=not disable_failure_analyzer,
+        hybrid_retrieval_enabled=not disable_hybrid_retrieval,
+        edit_plan_enabled=not disable_edit_plan,
+        self_review_on_finish=not disable_self_review,
+        patch_self_review_enabled=not disable_self_review,
         stream=stream,
         stream_callback=_stream_cb if stream else None,
         thought_callback=_thought_cb if stream else None,
@@ -231,6 +245,17 @@ def _execute_run(
         confirm_callback=confirm_cb,
     )
     agent = Agent(backend, registry, agent_config)
+    mechanisms = {
+        "run_mode": run_mode,
+        "failure_analyzer": not disable_failure_analyzer,
+        "hybrid_retrieval": not disable_hybrid_retrieval,
+        "edit_plan": not disable_edit_plan,
+        "self_review": not disable_self_review,
+        "long_memory": config.context.enable_long_memory and not disable_long_memory,
+        "compression": config.context.enable_compression and not disable_compression,
+    }
+    if manifest is not None:
+        manifest.setdefault("mechanisms", {}).update(mechanisms)
 
     task_obj = Task(
         description=description,
@@ -348,6 +373,13 @@ def cli(ctx: click.Context, config: str | None) -> None:
 @click.option("--provider", "-p", default=None, help="Override LLM provider")
 @click.option("--max-steps", default=None, type=int, help="Override max steps")
 @click.option("--stream", "-s", is_flag=True, default=True, help="Enable streaming output (default: on)")
+@click.option("--run-mode", type=click.Choice(["safe", "review", "auto"]), default="auto", show_default=True, help="Execution mode")
+@click.option("--disable-failure-analyzer", is_flag=True, default=False, help="Disable structured failure analysis")
+@click.option("--disable-hybrid-retrieval", is_flag=True, default=False, help="Disable hybrid retrieval hints")
+@click.option("--disable-edit-plan", is_flag=True, default=False, help="Disable edit plan validation")
+@click.option("--disable-self-review", is_flag=True, default=False, help="Disable patch and finish self-review")
+@click.option("--disable-long-memory", is_flag=True, default=False, help="Disable long memory retrieval")
+@click.option("--disable-compression", is_flag=True, default=False, help="Disable context compression")
 @click.option("--confirm", is_flag=True, default=False, help="Ask confirmation before running dangerous shell commands")
 @click.option("--sandbox", is_flag=True, default=False, help="Run commands in Docker sandbox (requires Docker)")
 @click.option("--verbose", "-v", is_flag=True, help="Show debug logs")
@@ -361,6 +393,13 @@ def run(
     provider: str | None,
     max_steps: int | None,
     stream: bool,
+    run_mode: str,
+    disable_failure_analyzer: bool,
+    disable_hybrid_retrieval: bool,
+    disable_edit_plan: bool,
+    disable_self_review: bool,
+    disable_long_memory: bool,
+    disable_compression: bool,
     confirm: bool,
     sandbox: bool,
     verbose: bool,
@@ -418,6 +457,13 @@ def run(
         sandbox=sandbox,
         verbose=verbose,
         show_banner=True,
+        run_mode=run_mode,
+        disable_failure_analyzer=disable_failure_analyzer,
+        disable_hybrid_retrieval=disable_hybrid_retrieval,
+        disable_edit_plan=disable_edit_plan,
+        disable_self_review=disable_self_review,
+        disable_long_memory=disable_long_memory,
+        disable_compression=disable_compression,
     )
     sys.exit(0 if result.is_success() else 1)
 
@@ -706,6 +752,9 @@ def benchmark_summarize(
     click.echo(f"  Auto symbol probes : {summary['auto_symbol_probes']}\n")
     click.echo(f"  Long memory hits   : {summary['long_memory_hits']}")
     click.echo(f"  Context compressions: {summary['context_compressions']}\n")
+    click.echo(f"  Failure analyses   : {summary['failure_analyses']}")
+    click.echo(f"  Edit plans         : {summary['edit_plans']}")
+    click.echo(f"  Patch review fails : {summary['patch_review_failures']}\n")
     if markdown_out:
         click.echo(f"  Markdown report    : {markdown_out}\n")
 
@@ -769,6 +818,33 @@ def benchmark_compare(
         click.echo(f"  Markdown report          : {markdown_out}\n")
 
 
+@benchmark.command("ablation-report")
+@click.option("--dir", "artifact_dir", default="./logs/artifacts", help="Artifact root directory")
+@click.option("--only-agent-runs", is_flag=True, default=False, help="Exclude preflight-verified runs")
+@click.option("--markdown-out", default="ablation_report.md", show_default=True, help="Write ablation report to Markdown")
+@click.option("--json-output", is_flag=True, default=False, help="Print grouped summary as JSON")
+def benchmark_ablation_report(
+    artifact_dir: str,
+    only_agent_runs: bool,
+    markdown_out: str,
+    json_output: bool,
+) -> None:
+    """Summarize benchmark results grouped by mechanism profile."""
+    from agent.benchmark import summarize_by_mechanism
+
+    root = Path(artifact_dir)
+    if not root.exists():
+        click.echo(red(f"Artifact directory not found: {root}"), err=True)
+        sys.exit(1)
+    grouped = summarize_by_mechanism(root, include_preverified=not only_agent_runs)
+    if json_output:
+        click.echo(json.dumps(grouped, ensure_ascii=False, indent=2))
+        return
+    out = Path(markdown_out)
+    out.write_text(_render_ablation_markdown(grouped), encoding="utf-8")
+    click.echo(green(f"Ablation report written: {out}"))
+
+
 @benchmark.command("run")
 @click.option("--repo", "-r", default=".", show_default=True, help="Target repository for all task files")
 @click.option("--tasks-dir", required=True, help="Directory containing task .txt files")
@@ -778,6 +854,13 @@ def benchmark_compare(
 @click.option("--provider", "-p", default=None, help="Override LLM provider")
 @click.option("--max-steps", default=None, type=int, help="Override max steps")
 @click.option("--skip-preverified/--no-skip-preverified", default=True, show_default=True, help="Skip the LLM run when the task's target verification already passes")
+@click.option("--mechanism-profile", type=click.Choice(["baseline", "partial", "full"]), default="full", show_default=True, help="Mechanism profile for ablation runs")
+@click.option("--disable-failure-analyzer", is_flag=True, default=False, help="Disable structured failure analysis")
+@click.option("--disable-hybrid-retrieval", is_flag=True, default=False, help="Disable hybrid retrieval hints")
+@click.option("--disable-edit-plan", is_flag=True, default=False, help="Disable edit plan validation")
+@click.option("--disable-self-review", is_flag=True, default=False, help="Disable patch and finish self-review")
+@click.option("--disable-long-memory", is_flag=True, default=False, help="Disable long memory retrieval")
+@click.option("--disable-compression", is_flag=True, default=False, help="Disable context compression")
 @click.option("--stream", "-s", is_flag=True, default=False, help="Enable streaming output")
 @click.option("--confirm", is_flag=True, default=False, help="Ask confirmation before dangerous shell commands")
 @click.option("--sandbox", is_flag=True, default=False, help="Run commands in Docker sandbox (requires Docker)")
@@ -793,6 +876,13 @@ def benchmark_run(
     provider: str | None,
     max_steps: int | None,
     skip_preverified: bool,
+    mechanism_profile: str,
+    disable_failure_analyzer: bool,
+    disable_hybrid_retrieval: bool,
+    disable_edit_plan: bool,
+    disable_self_review: bool,
+    disable_long_memory: bool,
+    disable_compression: bool,
     stream: bool,
     confirm: bool,
     sandbox: bool,
@@ -819,6 +909,24 @@ def benchmark_run(
 
     config = load_config(ctx.obj.get("config_path"))
     config = merge_cli_overrides(config, provider=provider, model=model, max_steps=max_steps)
+    if mechanism_profile == "baseline":
+        disable_failure_analyzer = True
+        disable_hybrid_retrieval = True
+        disable_edit_plan = True
+        disable_self_review = True
+    elif mechanism_profile == "partial":
+        disable_edit_plan = True
+        disable_self_review = True
+    mechanisms = {
+        "run_mode": "benchmark",
+        "mechanism_profile": mechanism_profile,
+        "failure_analyzer": not disable_failure_analyzer,
+        "hybrid_retrieval": not disable_hybrid_retrieval,
+        "edit_plan": not disable_edit_plan,
+        "self_review": not disable_self_review,
+        "long_memory": config.context.enable_long_memory and not disable_long_memory,
+        "compression": config.context.enable_compression and not disable_compression,
+    }
 
     repo_path = Path(repo).resolve()
     if not repo_path.exists():
@@ -881,6 +989,12 @@ def benchmark_run(
                 grader=grader,
                 sandbox=sandbox,
             )
+            manifest["mechanisms"] = mechanisms
+            manifest["task_metadata"] = {
+                "category": spec.category,
+                "difficulty": spec.difficulty,
+                "expected_failure_type": spec.expected_failure_type,
+            }
             _result, artifact_dir = export_failed_benchmark_artifact(
                 spec=spec,
                 repo_path=task_repo,
@@ -903,6 +1017,12 @@ def benchmark_run(
             grader=grader,
             sandbox=sandbox,
         )
+        manifest["mechanisms"] = mechanisms
+        manifest["task_metadata"] = {
+            "category": spec.category,
+            "difficulty": spec.difficulty,
+            "expected_failure_type": spec.expected_failure_type,
+        }
 
         click.echo(bold(f"[{index}/{len(task_files)}] {task_file.name}"))
         click.echo(dim(f"  Source repo    : {source_task_repo}"))
@@ -974,6 +1094,13 @@ def benchmark_run(
                 sandbox=sandbox,
                 verbose=verbose,
                 show_banner=False,
+                run_mode="benchmark",
+                disable_failure_analyzer=disable_failure_analyzer,
+                disable_hybrid_retrieval=disable_hybrid_retrieval,
+                disable_edit_plan=disable_edit_plan,
+                disable_self_review=disable_self_review,
+                disable_long_memory=disable_long_memory,
+                disable_compression=disable_compression,
             )
         except Exception as exc:
             failure_info = failure(
@@ -1058,6 +1185,73 @@ def benchmark_patch_replay(
         click.echo(red(f"  Error    : {result['error']}"))
     if result["output"]:
         click.echo(dim(f"\n{result['output']}"))
+
+
+@cli.group()
+def patch() -> None:
+    """Inspect and rollback patch artifacts."""
+
+
+@patch.command("latest")
+@click.option("--artifact-dir", required=True, help="Artifact directory containing patches.json")
+def patch_latest(artifact_dir: str) -> None:
+    """Show the latest patch metadata for a run artifact."""
+    artifact_path = Path(artifact_dir)
+    patches_path = artifact_path / "patches.json"
+    if not patches_path.exists():
+        click.echo(red(f"Error: patches.json not found in {artifact_path}"), err=True)
+        sys.exit(1)
+    patches = json.loads(patches_path.read_text(encoding="utf-8"))
+    patch_items = [item for item in patches if item.get("tool_name") in {"apply_patch", "file_write"}]
+    if not patch_items:
+        click.echo(yellow("No apply_patch/file_write entries found."))
+        return
+    click.echo(json.dumps(patch_items[-1], ensure_ascii=False, indent=2))
+
+
+@patch.command("rollback")
+@click.option("--artifact-dir", required=True, help="Artifact directory containing patches.json")
+@click.option("--repo", default=".", show_default=True, help="Repository path where rollback should be applied")
+def patch_rollback(artifact_dir: str, repo: str) -> None:
+    """Rollback the latest apply_patch using reverse_patch metadata."""
+    from tools.file_tool import ApplyPatchTool
+
+    artifact_path = Path(artifact_dir)
+    patches_path = artifact_path / "patches.json"
+    if not patches_path.exists():
+        click.echo(red(f"Error: patches.json not found in {artifact_path}"), err=True)
+        sys.exit(1)
+    patches = json.loads(patches_path.read_text(encoding="utf-8"))
+    patch_items = [
+        item for item in patches
+        if item.get("tool_name") == "apply_patch" and item.get("reverse_patch")
+    ]
+    if not patch_items:
+        click.echo(red("Error: no rollback-capable patch found."), err=True)
+        sys.exit(1)
+    reverse_patch = dict(patch_items[-1]["reverse_patch"])
+    reverse_path = Path(str(reverse_patch.get("path", "")))
+    if not reverse_path.is_absolute():
+        reverse_patch["path"] = str(Path(repo).resolve() / reverse_path)
+    result = ApplyPatchTool().execute(reverse_patch)
+    event = {
+        "event_type": "rollback",
+        "artifact_dir": str(artifact_path),
+        "repo": str(Path(repo).resolve()),
+        "success": result.success,
+        "output": result.output,
+        "error": result.error,
+        "reverse_patch": reverse_patch,
+    }
+    rollback_path = artifact_path / "rollback_events.jsonl"
+    with rollback_path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(event, ensure_ascii=False) + "\n")
+    if result.success:
+        click.echo(green(result.output))
+        click.echo(dim(f"Rollback event: {rollback_path}"))
+        return
+    click.echo(red(f"Rollback failed: {result.error}"), err=True)
+    sys.exit(1)
 
 
 def _render_benchmark_compare_markdown(comparison: dict) -> str:
@@ -1171,6 +1365,9 @@ def _render_benchmark_summary_markdown(summary: dict) -> str:
             f"| Auto symbol probes | {summary['auto_symbol_probes']} |",
             f"| Long memory hits | {summary['long_memory_hits']} |",
             f"| Context compressions | {summary['context_compressions']} |",
+            f"| Failure analyses | {summary['failure_analyses']} |",
+            f"| Edit plans | {summary['edit_plans']} |",
+            f"| Patch review failures | {summary['patch_review_failures']} |",
             "",
             "## Failure Type Distribution",
             "",
@@ -1207,6 +1404,30 @@ def _render_benchmark_summary_markdown(summary: dict) -> str:
             "",
         ]
     )
+
+
+def _render_ablation_markdown(grouped: dict) -> str:
+    groups = grouped.get("groups", {})
+    lines = [
+        "# Ablation Report",
+        "",
+        f"- Artifact root: `{grouped.get('artifact_root')}`",
+        f"- Scope: `{'all-runs' if grouped.get('include_preverified', True) else 'agent-only'}`",
+        "",
+        "| Profile | Runs | Success Rate | First-pass | Avg Steps | Avg Tools | Avg Tokens | Patch Success | Failure Analyses | Edit Plans | Patch Review Fails |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for name, summary in sorted(groups.items()):
+        lines.append(
+            f"| {name} | {summary['run_count']} | {summary['success_rate']:.2%} | "
+            f"{summary['first_pass_success_rate']:.2%} | {summary['avg_steps']} | "
+            f"{summary['avg_tool_calls']} | {summary['avg_tokens']} | "
+            f"{summary['patch_success_rate']:.2%} | {summary['failure_analyses']} | "
+            f"{summary['edit_plans']} | {summary['patch_review_failures']} |"
+        )
+    if not groups:
+        lines.append("| - | 0 | 0.00% | 0.00% | 0 | 0 | 0 | 0.00% | 0 | 0 | 0 |")
+    return "\n".join(lines) + "\n"
 
 
 def _markdown_cell(value: object) -> str:

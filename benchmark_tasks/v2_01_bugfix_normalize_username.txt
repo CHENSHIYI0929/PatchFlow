@@ -1,0 +1,10 @@
+---
+repo: benchmark_fixtures/v2_suite
+category: bugfix
+difficulty: easy
+target_files: v2_cases.py
+test_cmd: python -m pytest test_v2_cases.py::test_normalize_username_strips_and_lowercases -q
+exclude_paths: logs, README.md
+expected_failure_type: verification_failed
+---
+Fix normalize_username so it strips surrounding whitespace and lowercases the username.

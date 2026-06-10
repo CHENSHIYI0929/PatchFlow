@@ -488,6 +488,129 @@ class SequencedTool(NoopTool):
 
 
 class TestFinishVerification:
+    def test_failure_analysis_and_hybrid_retrieval_are_injected(self, tmp_path):
+        task = Task(
+            task_id="analysis1",
+            description="fix parser empty input",
+            repo_path=str(tmp_path),
+            target_files=["parser.py"],
+            max_steps=3,
+        )
+        (tmp_path / "parser.py").write_text("def parse_empty(value):\n    return value.strip()\n", encoding="utf-8")
+        (tmp_path / "test_parser.py").write_text("from parser import parse_empty\n", encoding="utf-8")
+        log = EventLog.create(task, log_dir=str(tmp_path / "logs"))
+        registry = ToolRegistry()
+        registry.register(FailingTool("test", 'FAILED test_parser.py::test_empty\nFile "parser.py", line 1\nValueError: bad empty'))
+        script = [
+            make_tool_call_action("test", {"path": "test_parser.py"}),
+            make_give_up_action("stop"),
+        ]
+        backend = MockBackend(script)
+        config = AgentConfig(test_tool_names=("test",), auto_graph_probe_on_test_failure=False)
+        agent = Agent(backend, registry, config)
+
+        agent.run(task, log)
+
+        second_call_messages = backend.received_messages[1]
+        contents = "\n".join(message.content for message in second_call_messages)
+        assert "[FAILURE ANALYSIS]" in contents
+        assert "test_parser.py::test_empty" in contents
+        assert "[HYBRID RETRIEVAL]" in contents
+        assert "parser.py" in contents
+
+    def test_edit_plan_recorded_for_patch(self, tmp_path):
+        task = Task(task_id="plan1", description="edit demo", repo_path=str(tmp_path), max_steps=3)
+        target = tmp_path / "demo.py"
+        target.write_text("x = 1\n", encoding="utf-8")
+        log = EventLog.create(task, log_dir=str(tmp_path / "logs"))
+        registry = ToolRegistry()
+        registry.register(ApplyPatchTool())
+        script = [
+            make_tool_call_action(
+                "apply_patch",
+                {
+                    "patch_type": "search_replace",
+                    "path": str(target),
+                    "search": "x = 1",
+                    "replace": "x = 2",
+                },
+                thought='EDIT_PLAN: {"target_files":["demo.py"],"change_intent":"update x","expected_behavior":"x changes","risk_level":"low","tests_to_run":[]}',
+            ),
+            make_finish_action("done"),
+        ]
+        backend = MockBackend(script)
+        agent = Agent(backend, registry)
+
+        result = agent.run(task, log)
+
+        assert result.is_success()
+        events = log.replay()
+        assert any(e.event_type.value == "reflection" and e.payload["reason"] == "edit_plan" for e in events)
+        patch_obs = [
+            e.payload["observation"] for e in events
+            if e.event_type.value == "observation" and e.payload["observation"]["tool_name"] == "apply_patch"
+        ][0]
+        assert patch_obs["metadata"]["edit_plan"]["change_intent"] == "update x"
+
+    def test_safe_mode_blocks_patch_before_write(self, tmp_path):
+        task = Task(task_id="safe1", description="do not write", repo_path=str(tmp_path), max_steps=2)
+        target = tmp_path / "demo.py"
+        target.write_text("x = 1\n", encoding="utf-8")
+        log = EventLog.create(task, log_dir=str(tmp_path / "logs"))
+        registry = ToolRegistry()
+        registry.register(ApplyPatchTool())
+        script = [
+            make_tool_call_action(
+                "apply_patch",
+                {"patch_type": "replace_file", "path": str(target), "content": "x = 2\n"},
+            ),
+            make_give_up_action("blocked"),
+        ]
+        backend = MockBackend(script)
+        agent = Agent(backend, registry, AgentConfig(run_mode="safe"))
+
+        result = agent.run(task, log)
+
+        assert result.status == RunStatus.GAVE_UP
+        assert target.read_text(encoding="utf-8") == "x = 1\n"
+        events = log.replay()
+        obs = [
+            e.payload["observation"] for e in events
+            if e.event_type.value == "observation" and e.payload["observation"]["tool_name"] == "apply_patch"
+        ][0]
+        assert obs["metadata"]["run_mode"] == "safe"
+
+    def test_patch_review_blocks_high_risk_finish(self, tmp_path):
+        task = Task(task_id="patchreview", description="avoid tests", repo_path=str(tmp_path), max_steps=5)
+        target = tmp_path / "test_demo.py"
+        target.write_text("def test_x():\n    assert False\n", encoding="utf-8")
+        log = EventLog.create(task, log_dir=str(tmp_path / "logs"))
+        registry = ToolRegistry()
+        registry.register(ApplyPatchTool())
+        script = [
+            make_tool_call_action(
+                "apply_patch",
+                {
+                    "patch_type": "replace_file",
+                    "path": str(target),
+                    "content": "def test_x():\n    assert True\n",
+                },
+            ),
+            make_finish_action("too risky"),
+            make_give_up_action("blocked by review"),
+        ]
+        backend = MockBackend(script)
+        agent = Agent(backend, registry)
+
+        result = agent.run(task, log)
+
+        assert result.status == RunStatus.GAVE_UP
+        events = log.replay()
+        assert any(
+            e.event_type.value == "reflection" and e.payload["reason"] == "self_review_failed"
+            for e in events
+        )
+
     def test_finish_verification_failure_feeds_back_into_next_round(self, tmp_path):
         task = Task(
             task_id="verifyloop",

@@ -39,6 +39,7 @@ explore the repository, make the necessary code changes, and verify they work co
 - Prefer structured edits with apply_patch for code changes; use file_write only when you intend to replace an entire file
 - When tests fail or you need to expand beyond one file, use graph_neighbors to inspect imported/importing files and symbol relationships
 - When you apply a patch, pay attention to conflict checks in the result metadata; if a patch was wrong, use revert_patch with the provided reverse_patch
+- Before apply_patch or file_write, include an EDIT_PLAN JSON object in your thought with target_files, change_intent, expected_behavior, risk_level, and tests_to_run
 - After editing files, always run tests to verify your changes
 - If tests fail, read the error carefully and fix the root cause, not the symptom
 - If you are stuck after several attempts, reflect on your approach and try differently
@@ -193,6 +194,7 @@ Please fix the following issue in the repository at {repo_path}.
 - Prefer verifying the task with the targeted test command first when one is provided
 - Prefer apply_patch for targeted edits; use file_write only for full-file rewrites
 - If a targeted test fails, use graph_neighbors or symbol search to inspect adjacent modules before making broad edits
+- Before any write action, include EDIT_PLAN: {{"target_files":["..."],"change_intent":"...","expected_behavior":"...","risk_level":"low|medium|high","tests_to_run":["..."]}}
 - Make the minimal changes necessary to fix the issue
 - Run the tests to verify your fix works
 - If the targeted verification already passes before any edit and the code already satisfies the task, finish instead of continuing to explore

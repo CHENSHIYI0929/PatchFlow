@@ -35,6 +35,9 @@ class BenchmarkTaskSpec:
     repo: str | None = None
     test_path: str | None = None
     test_cmd: str | None = None
+    category: str | None = None
+    difficulty: str | None = None
+    expected_failure_type: str | None = None
     lint_cmd: str | None = None
     patch_policy_cmd: str | None = None
     exclude_paths: list[str] | None = None
@@ -52,7 +55,7 @@ def load_task_spec(task_file: str | Path) -> BenchmarkTaskSpec:
     - plain-text task descriptions
     - a simple front-matter block:
         ---
-        repo: demo/flash_demo
+        repo: benchmark_fixtures/flash_demo
         test_path: test_buggy_math.py
         finish_if_verified: true
         ---
@@ -68,6 +71,9 @@ def load_task_spec(task_file: str | Path) -> BenchmarkTaskSpec:
         repo=metadata.get("repo"),
         test_path=metadata.get("test_path"),
         test_cmd=metadata.get("test_cmd"),
+        category=metadata.get("category"),
+        difficulty=metadata.get("difficulty"),
+        expected_failure_type=metadata.get("expected_failure_type"),
         lint_cmd=metadata.get("lint_cmd"),
         patch_policy_cmd=metadata.get("patch_policy_cmd"),
         exclude_paths=_coerce_list(metadata.get("exclude_paths")),
@@ -328,6 +334,16 @@ def summarize_artifacts(root: str | Path, *, include_preverified: bool = True) -
             for path, metrics, result, manifest in run_pairs
             if not metrics.get("preflight_verified")
         ]
+    return _summarize_run_pairs(root, run_pairs, include_preverified=include_preverified)
+
+
+def _summarize_run_pairs(
+    root: str | Path,
+    run_pairs: list[tuple[Path, dict[str, Any], dict[str, Any], dict[str, Any]]],
+    *,
+    include_preverified: bool,
+) -> dict[str, Any]:
+    """Aggregate already-loaded artifact tuples."""
     artifact_dirs = [path for path, *_ in run_pairs]
     runs = [metrics for _, metrics, _, _ in run_pairs]
     results = [result for _, _, result, _ in run_pairs]
@@ -359,6 +375,9 @@ def summarize_artifacts(root: str | Path, *, include_preverified: bool = True) -
         "auto_symbol_probes": 0,
         "long_memory_hits": 0,
         "context_compressions": 0,
+        "failure_analyses": 0,
+        "edit_plans": 0,
+        "patch_review_failures": 0,
         "failure_type_distribution": {},
         "failure_stage_distribution": {},
         "runs": [],
@@ -382,6 +401,9 @@ def summarize_artifacts(root: str | Path, *, include_preverified: bool = True) -
     auto_symbol_probes = sum(int(item.get("auto_symbol_probes", 0)) for item in runs)
     long_memory_hits = sum(int(item.get("long_memory_hits", 0)) for item in runs)
     context_compressions = sum(int(item.get("context_compressions", 0)) for item in runs)
+    failure_analyses = sum(int(item.get("failure_analyses", 0)) for item in runs)
+    edit_plans = sum(int(item.get("edit_plans", 0)) for item in runs)
+    patch_review_failures = sum(int(item.get("patch_review_failures", 0)) for item in runs)
     failure_types: dict[str, int] = {}
     failure_stages: dict[str, int] = {}
     for result in results:
@@ -430,6 +452,9 @@ def summarize_artifacts(root: str | Path, *, include_preverified: bool = True) -
             "auto_symbol_probes": auto_symbol_probes,
             "long_memory_hits": long_memory_hits,
             "context_compressions": context_compressions,
+            "failure_analyses": failure_analyses,
+            "edit_plans": edit_plans,
+            "patch_review_failures": patch_review_failures,
             "failure_type_distribution": failure_types,
             "failure_stage_distribution": failure_stages,
             "runs": [
@@ -452,6 +477,9 @@ def summarize_artifacts(root: str | Path, *, include_preverified: bool = True) -
                     "auto_symbol_probes": int(metrics.get("auto_symbol_probes", 0)),
                     "long_memory_hits": int(metrics.get("long_memory_hits", 0)),
                     "context_compressions": int(metrics.get("context_compressions", 0)),
+                    "failure_analyses": int(metrics.get("failure_analyses", 0)),
+                    "edit_plans": int(metrics.get("edit_plans", 0)),
+                    "patch_review_failures": int(metrics.get("patch_review_failures", 0)),
                     "failure_type": result.get("failure_type"),
                     "failure_stage": result.get("failure_stage"),
                     "failure_message": result.get("failure_message"),
@@ -502,6 +530,9 @@ def compare_artifact_roots(
         "auto_symbol_probes",
         "long_memory_hits",
         "context_compressions",
+        "failure_analyses",
+        "edit_plans",
+        "patch_review_failures",
     ]
 
     deltas = {}
@@ -515,6 +546,35 @@ def compare_artifact_roots(
         "left": left_summary,
         "right": right_summary,
         "delta": deltas,
+    }
+
+
+def summarize_by_mechanism(root: str | Path, *, include_preverified: bool = True) -> dict[str, Any]:
+    """Group artifact summaries by manifest mechanism profile."""
+    artifact_dirs = discover_artifact_dirs(root)
+    groups: dict[str, list[Path]] = {}
+    for artifact_dir in artifact_dirs:
+        metrics = load_metrics(artifact_dir)
+        if not include_preverified and metrics.get("preflight_verified"):
+            continue
+        manifest = _load_json_if_exists(artifact_dir / "run_manifest.json")
+        mechanisms = manifest.get("mechanisms") or {}
+        key = str(mechanisms.get("mechanism_profile") or mechanisms.get("run_mode") or "unknown")
+        groups.setdefault(key, []).append(artifact_dir)
+
+    grouped = {}
+    for key, paths in groups.items():
+        run_pairs = []
+        for path in paths:
+            metrics = load_metrics(path)
+            result = _load_json_if_exists(path / "result.json")
+            manifest = _load_json_if_exists(path / "run_manifest.json")
+            run_pairs.append((path, metrics, result, manifest))
+        grouped[key] = _summarize_run_pairs(root, run_pairs, include_preverified=include_preverified)
+    return {
+        "artifact_root": str(Path(root)),
+        "include_preverified": include_preverified,
+        "groups": grouped,
     }
 
 

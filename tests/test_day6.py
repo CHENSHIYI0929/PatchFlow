@@ -922,12 +922,12 @@ class TestBenchmarkTaskSpecs:
 
         task_file = tmp_path / "task.txt"
         task_file.write_text(
-            "---\nrepo: demo/run_demo\ntest_path: test_report.py\nlint_cmd: python -m pytest test_lint.py -q\npatch_policy_cmd: python check_patch.py\nexclude_paths: logs, README.md\ntarget_files: report.py, scores.py\nfinish_if_verified: false\nmax_steps: 9\n---\nFix the report bug",
+            "---\nrepo: benchmark_fixtures/run_demo\ntest_path: test_report.py\nlint_cmd: python -m pytest test_lint.py -q\npatch_policy_cmd: python check_patch.py\nexclude_paths: logs, README.md\ntarget_files: report.py, scores.py\nfinish_if_verified: false\nmax_steps: 9\n---\nFix the report bug",
             encoding="utf-8",
         )
         spec = load_task_spec(task_file)
 
-        assert spec.repo == "demo/run_demo"
+        assert spec.repo == "benchmark_fixtures/run_demo"
         assert spec.test_path == "test_report.py"
         assert spec.lint_cmd == "python -m pytest test_lint.py -q"
         assert spec.patch_policy_cmd == "python check_patch.py"
@@ -936,6 +936,20 @@ class TestBenchmarkTaskSpecs:
         assert spec.finish_if_verified is False
         assert spec.max_steps == 9
         assert spec.description == "Fix the report bug"
+
+    def test_load_task_spec_v2_metadata(self, tmp_path):
+        from agent.benchmark import load_task_spec
+
+        task_file = tmp_path / "task.txt"
+        task_file.write_text(
+            "---\ncategory: bugfix\ndifficulty: medium\nexpected_failure_type: verification_failed\n---\nFix it",
+            encoding="utf-8",
+        )
+        spec = load_task_spec(task_file)
+
+        assert spec.category == "bugfix"
+        assert spec.difficulty == "medium"
+        assert spec.expected_failure_type == "verification_failed"
 
     def test_build_run_manifest_includes_runtime_metadata(self, tmp_path):
         from agent.benchmark import build_run_manifest

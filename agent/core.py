@@ -24,6 +24,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from agent.edit_plan import WRITE_TOOLS, parse_or_infer_edit_plan, validate_edit_plan
 from agent.event_log import EventLog
 from agent.failure import (
     FAILURE_STAGE_AGENT_LOOP,
@@ -32,6 +33,8 @@ from agent.failure import (
     infer_failure_from_event_dicts,
     normalize_agent_loop_failure,
 )
+from agent.failure_analyzer import analyze_failure, format_failure_analysis_for_prompt
+from agent.hybrid_retrieval import format_candidates_for_prompt, retrieve_candidates
 from agent.memory import format_memory_hits, search_memories
 from context.history import ConversationHistory
 from context.repo_map import RepoMap
@@ -44,13 +47,13 @@ from agent.prompt import (
     reflection_test_failed,
     reflection_verification_failed,
 )
-from agent.review import review_patch_before_finish
+from agent.review import review_patch_before_finish, review_patch_metadata
 from agent.task import (
     Action, ActionType, Event, EventType,
     Observation, ObservationStatus, RunResult, RunStatus, Task, ToolCall,
 )
 from llm.base import LLMBackend, LLMMessage, LLMToolSchema
-from tools.base import ToolRegistry
+from tools.base import ToolRegistry, ToolResult
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +80,11 @@ class AgentConfig:
     verify_on_finish: bool = True                   # FINISH 前用 task.test_cmd 做最后验证
     self_review_on_finish: bool = True              # FINISH 前检查 diff 中的明显阻断问题
     taxonomy_recovery_prompts: bool = True          # 根据 failure_type 注入恢复提示
+    failure_analyzer_enabled: bool = True           # 解析失败输出并注入结构化分析
+    hybrid_retrieval_enabled: bool = True           # 根据失败分析检索候选文件
+    edit_plan_enabled: bool = True                  # 写操作前记录/校验 edit plan
+    patch_self_review_enabled: bool = True          # patch 后做增强自审
+    run_mode: str = "auto"                          # auto | safe | review | benchmark
     enable_context_compression: bool = True         # 历史超窗时压缩旧消息
     enable_long_memory: bool = True                 # 运行开始时检索本地长期记忆
     long_memory_limit: int = 5                      # 每次注入的长期记忆条数上限
@@ -287,7 +295,12 @@ class Agent:
             # ── 5. 执行工具 ─────────────────────────────────────────────
             if action.action_type == ActionType.TOOL_CALL and action.tool_call:
                 tc = action.tool_call
-                result = self._registry.execute_tool(tc.name, tc.params)
+                result = self._prepare_and_execute_tool(
+                    task=task,
+                    step=step,
+                    action=action,
+                    log=log,
+                )
                 observation = result.to_observation(tc.name)
 
                 # 追踪是否有文件写操作
@@ -298,6 +311,15 @@ class Agent:
                     steps_without_edit += 1
 
                 log.log_observation(step=step, observation=observation)
+
+                if tc.name in WRITE_TOOLS and observation.is_success():
+                    self._review_patch_observation(
+                        task=task,
+                        step=step,
+                        observation=observation,
+                        log=log,
+                        history=history,
+                    )
 
                 # 把 action 和 observation 加入对话历史
                 history.add(LLMMessage(
@@ -369,6 +391,13 @@ class Agent:
                         prompt=reflect_prompt,
                     )
                     history.add(LLMMessage(role="user", content=reflect_prompt))
+                    self._analyze_and_retrieve_after_failure(
+                        task=task,
+                        step=step,
+                        observation=observation,
+                        log=log,
+                        history=history,
+                    )
                     logger.debug("Reflection triggered: test_failed at step %d", step)
 
                 # 触发条件 B：连续 N 步无编辑
@@ -501,6 +530,156 @@ class Agent:
             for a in recent[1:]
         )
 
+    def _prepare_and_execute_tool(
+        self,
+        *,
+        task: Task,
+        step: int,
+        action: Action,
+        log: EventLog,
+    ) -> ToolResult:
+        tc = action.tool_call
+        if tc is None:
+            return ToolResult(success=False, output="", error="Missing tool call.", failure_type="tool_failure")
+
+        plan = None
+        if tc.name in WRITE_TOOLS:
+            plan = parse_or_infer_edit_plan(
+                action.thought,
+                tc.name,
+                tc.params,
+                default_test_cmd=task.test_cmd,
+            )
+            plan = validate_edit_plan(
+                plan,
+                exclude_paths=task.exclude_paths,
+                target_files=task.target_files,
+            )
+            log.log_reflection(step=step, reason="edit_plan", prompt=json.dumps(plan.to_dict(), ensure_ascii=False))
+            if self._cfg.edit_plan_enabled and not plan.valid:
+                return ToolResult(
+                    success=False,
+                    output="",
+                    error="EDIT_PLAN validation failed: " + "; ".join(plan.errors),
+                    metadata={"edit_plan": plan.to_dict()},
+                    failure_type="tool_failure",
+                )
+            if self._cfg.run_mode == "safe":
+                return ToolResult(
+                    success=False,
+                    output=self._format_patch_preview(tc.name, tc.params),
+                    error="Safe mode blocks file modification. Review the plan and rerun in review or auto mode to edit.",
+                    metadata={"edit_plan": plan.to_dict(), "patch_preview": tc.params, "run_mode": "safe"},
+                    failure_type="tool_failure",
+                )
+            if self._cfg.run_mode == "review" and not self._confirm_review_patch(tc.name, tc.params):
+                return ToolResult(
+                    success=False,
+                    output=self._format_patch_preview(tc.name, tc.params),
+                    error="Review mode paused before applying patch.",
+                    metadata={"edit_plan": plan.to_dict(), "patch_preview": tc.params, "run_mode": "review"},
+                    failure_type="tool_failure",
+                )
+
+        result = self._registry.execute_tool(tc.name, tc.params)
+        if plan is not None:
+            if result.metadata is None:
+                result.metadata = {}
+            result.metadata.setdefault("edit_plan", plan.to_dict())
+        return result
+
+    def _confirm_review_patch(self, tool_name: str, params: dict) -> bool:
+        callback = self._cfg.confirm_callback
+        if callback is None:
+            return False
+        message = self._format_patch_preview(tool_name, params)
+        try:
+            return bool(callback(message))
+        except TypeError:
+            return bool(callback(tool_name, params))
+
+    def _format_patch_preview(self, tool_name: str, params: dict) -> str:
+        path = params.get("path", "(unknown)")
+        patch_type = params.get("patch_type", tool_name)
+        body = params.get("replace") or params.get("content") or ""
+        preview = body if len(body) <= 1200 else body[:1200] + "\n... [preview truncated]"
+        return f"Patch preview for {path} ({patch_type}):\n{preview}"
+
+    def _review_patch_observation(
+        self,
+        *,
+        task: Task,
+        step: int,
+        observation: Observation,
+        log: EventLog,
+        history: ConversationHistory,
+    ) -> None:
+        if not self._cfg.patch_self_review_enabled:
+            return
+        review = review_patch_metadata(
+            observation.metadata or {},
+            exclude_paths=task.exclude_paths,
+            allow_test_edits=False,
+        )
+        review_observation = Observation(
+            status=ObservationStatus.SUCCESS if review.success else ObservationStatus.ERROR,
+            output=review.message,
+            tool_name="patch_review",
+            error=None if review.success else review.message,
+            metadata=review.to_metadata(),
+        )
+        log.log_observation(step=step, observation=review_observation)
+        if not review.success:
+            prompt = (
+                "[PATCH REVIEW] The last patch has high-risk findings. "
+                "Fix or revert before continuing:\n"
+                + "\n".join(f"- {finding}" for finding in review.findings)
+            )
+            log.log_reflection(step=step, reason="patch_review_failed", prompt=prompt)
+            history.add(LLMMessage(role="user", content=prompt))
+
+    def _analyze_and_retrieve_after_failure(
+        self,
+        *,
+        task: Task,
+        step: int,
+        observation: Observation,
+        log: EventLog,
+        history: ConversationHistory,
+    ) -> None:
+        analysis = None
+        if self._cfg.failure_analyzer_enabled:
+            analysis = analyze_failure(observation)
+            prompt = format_failure_analysis_for_prompt(analysis)
+            analysis_obs = Observation(
+                status=ObservationStatus.SUCCESS,
+                output=prompt,
+                tool_name="failure_analyzer",
+                metadata=analysis.to_dict(),
+            )
+            log.log_observation(step=step, observation=analysis_obs)
+            history.add(LLMMessage(role="user", content=prompt))
+        if self._cfg.hybrid_retrieval_enabled:
+            candidates = retrieve_candidates(
+                task.repo_path,
+                task_description=task.description,
+                analysis=analysis,
+                target_files=task.target_files,
+            )
+            prompt = format_candidates_for_prompt(candidates)
+            retrieval_obs = Observation(
+                status=ObservationStatus.SUCCESS,
+                output=prompt,
+                tool_name="hybrid_retrieval",
+                metadata={
+                    "match_count": len(candidates),
+                    "matches": [item.to_dict() for item in candidates],
+                    "query": task.description,
+                },
+            )
+            log.log_observation(step=step, observation=retrieval_obs)
+            history.add(LLMMessage(role="user", content=prompt))
+
     def _should_continue_after_self_review(
         self,
         *,
@@ -522,18 +701,41 @@ class Agent:
         )
         log.log_observation(step=step, observation=observation)
         if review.success:
-            return False
+            high_risk = self._latest_high_risk_patch_review(log)
+            if not high_risk:
+                return False
+            observation = Observation(
+                status=ObservationStatus.ERROR,
+                output="High-risk patch review findings must be resolved before FINISH.",
+                tool_name="self_review",
+                error="High-risk patch review findings must be resolved before FINISH.",
+                metadata={"review_type": "finish_self_review", "risk_level": "high", "findings": high_risk},
+            )
+            log.log_observation(step=step, observation=observation)
 
         history.add(LLMMessage(role="assistant", content="Finish requested, but self-review found blocking issues."))
         history.add(LLMMessage(role="user", content=self._format_observation_for_history(observation)))
+        findings = review.findings or observation.metadata.get("findings", [])
         prompt = (
             "[REFLECTION] Self-review found blocking issues in the diff. "
             "Fix these findings before finishing:\n"
-            + "\n".join(f"- {finding}" for finding in review.findings)
+            + "\n".join(f"- {finding}" for finding in findings)
         )
         log.log_reflection(step=step, reason="self_review_failed", prompt=prompt)
         history.add(LLMMessage(role="user", content=prompt))
         return True
+
+    def _latest_high_risk_patch_review(self, log: EventLog) -> list[str]:
+        findings: list[str] = []
+        for event in log.replay():
+            if event.event_type != EventType.OBSERVATION:
+                continue
+            obs = event.payload.get("observation", {})
+            if obs.get("tool_name") != "patch_review":
+                continue
+            metadata = obs.get("metadata") or {}
+            findings = list(metadata.get("findings") or []) if metadata.get("risk_level") == "high" else []
+        return findings
 
     def _collect_recent_patch_text(self, log: EventLog) -> str | None:
         latest: str | None = None

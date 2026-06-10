@@ -1,0 +1,10 @@
+---
+repo: benchmark_fixtures/v2_suite
+category: refactor_safe
+difficulty: medium
+target_files: v2_cases.py
+test_cmd: python -m pytest test_v2_cases.py::test_parse_csv_line_strips_cells -q
+exclude_paths: logs, README.md
+expected_failure_type: verification_failed
+---
+Fix parse_csv_line so cells are stripped and empty cells are omitted.

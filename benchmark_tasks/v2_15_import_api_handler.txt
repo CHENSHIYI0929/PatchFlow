@@ -1,0 +1,10 @@
+---
+repo: benchmark_fixtures/v2_suite
+category: import_api
+difficulty: medium
+target_files: v2_cases.py
+test_cmd: python -m pytest test_v2_cases.py::test_resolve_handler_preserves_known_alias -q
+exclude_paths: logs, README.md
+expected_failure_type: verification_failed
+---
+Fix resolve_handler so HTTP resolves to http_handler.

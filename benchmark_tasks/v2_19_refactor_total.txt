@@ -1,0 +1,10 @@
+---
+repo: benchmark_fixtures/v2_suite
+category: refactor_safe
+difficulty: easy
+target_files: v2_cases.py
+test_cmd: python -m pytest test_v2_cases.py::test_refactor_total_sums_rows -q
+exclude_paths: logs, README.md
+expected_failure_type: verification_failed
+---
+Fix refactor_total so it sums all row amounts instead of keeping only the last row.

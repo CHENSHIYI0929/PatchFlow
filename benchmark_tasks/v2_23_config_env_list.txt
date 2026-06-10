@@ -1,0 +1,10 @@
+---
+repo: benchmark_fixtures/v2_suite
+category: config_cli
+difficulty: easy
+target_files: v2_cases.py
+test_cmd: python -m pytest test_v2_cases.py::test_env_list_ignores_empty_items -q
+exclude_paths: logs, README.md
+expected_failure_type: verification_failed
+---
+Fix env_list so empty comma-separated items are ignored.

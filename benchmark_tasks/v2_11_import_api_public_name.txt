@@ -1,0 +1,10 @@
+---
+repo: benchmark_fixtures/v2_suite
+category: import_api
+difficulty: easy
+target_files: v2_cases.py
+test_cmd: python -m pytest test_v2_cases.py::test_public_api_name_new_contract -q
+exclude_paths: logs, README.md
+expected_failure_type: verification_failed
+---
+Update public_api_name to return the new public API name patchflow_v2.

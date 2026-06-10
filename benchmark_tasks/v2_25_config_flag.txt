@@ -1,0 +1,10 @@
+---
+repo: benchmark_fixtures/v2_suite
+category: config_cli
+difficulty: medium
+target_files: v2_cases.py
+test_cmd: python -m pytest test_v2_cases.py::test_config_flag_false_default -q
+exclude_paths: logs, README.md
+expected_failure_type: verification_failed
+---
+Fix config_flag so missing boolean flags default to False.

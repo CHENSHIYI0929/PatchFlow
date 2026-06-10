@@ -71,6 +71,10 @@ def export_run_artifacts(
     _write_json(artifact_dir / "result.json", result.to_dict())
     _write_json(artifact_dir / "retrievals.json", retrievals)
     _write_json(artifact_dir / "patches.json", patches)
+    (artifact_dir / "final_report.md").write_text(
+        _render_final_report(result, metrics, retrievals, patches, events),
+        encoding="utf-8",
+    )
     if materialized_manifest is not None:
         _write_json(artifact_dir / "run_manifest.json", materialized_manifest)
     if result.patch:
@@ -81,7 +85,7 @@ def export_run_artifacts(
 
 def _collect_retrievals(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     retrievals: list[dict[str, Any]] = []
-    retrieval_tools = {"search_text", "find_files", "find_symbol", "graph_neighbors"}
+    retrieval_tools = {"search_text", "find_files", "find_symbol", "graph_neighbors", "hybrid_retrieval"}
 
     for event in events:
         if event["event_type"] == EventType.REPO_MAP.value:
@@ -131,6 +135,7 @@ def _collect_patches(events: list[dict[str, Any]], final_diff: str | None) -> li
                 "step_id": event["payload"].get("step_id"),
                 "success": obs.get("status") == "success",
                 "patch": metadata.get("patch"),
+                "edit_plan": metadata.get("edit_plan"),
                 "stats": metadata.get("stats", {}),
                 "reverse_patch": metadata.get("reverse_patch"),
                 "conflict": "conflict" in error_text.lower(),
@@ -143,6 +148,7 @@ def _collect_patches(events: list[dict[str, Any]], final_diff: str | None) -> li
                 "step_id": event["payload"].get("step_id"),
                 "success": obs.get("status") == "success",
                 "patch": metadata.get("patch"),
+                "edit_plan": metadata.get("edit_plan"),
                 "stats": metadata.get("stats", {}),
                 "reverse_patch": metadata.get("reverse_patch"),
                 "conflict": False,
@@ -207,6 +213,7 @@ def _collect_capability_stats(events: list[dict[str, Any]]) -> dict[str, int]:
     ]
     finish_verifier = [obs for obs in observations if obs.get("tool_name") == "finish_verifier"]
     self_reviews = [obs for obs in observations if obs.get("tool_name") == "self_review"]
+    patch_reviews = [obs for obs in observations if obs.get("tool_name") == "patch_review"]
     symbol_probes = [
         obs for obs in observations
         if (obs.get("metadata") or {}).get("auto_symbol_probe")
@@ -220,7 +227,94 @@ def _collect_capability_stats(events: list[dict[str, Any]]) -> dict[str, int]:
         "auto_symbol_probes": len(symbol_probes),
         "long_memory_hits": sum(1 for item in reflections if item.get("reason") == "long_memory"),
         "context_compressions": sum(1 for item in reflections if item.get("reason") == "context_compression"),
+        "failure_analyses": sum(1 for obs in observations if obs.get("tool_name") == "failure_analyzer"),
+        "edit_plans": sum(1 for item in reflections if item.get("reason") == "edit_plan"),
+        "patch_review_attempts": len(patch_reviews),
+        "patch_review_failures": sum(1 for obs in patch_reviews if obs.get("status") != "success"),
     }
+
+
+def _render_final_report(
+    result: RunResult,
+    metrics: dict[str, Any],
+    retrievals: list[dict[str, Any]],
+    patches: list[dict[str, Any]],
+    events: list[dict[str, Any]],
+) -> str:
+    modified = [
+        item.get("patch", {}).get("path")
+        for item in patches
+        if item.get("tool_name") in {"apply_patch", "file_write"} and item.get("patch")
+    ]
+    tests = [
+        obs.get("output") or obs.get("error")
+        for event in events
+        if event["event_type"] == EventType.OBSERVATION.value
+        for obs in [event["payload"]["observation"]]
+        if obs.get("tool_name") in {"test", "pytest", "finish_verifier", "preflight_verify"}
+    ]
+    reviews = [
+        event["payload"]["observation"]
+        for event in events
+        if event["event_type"] == EventType.OBSERVATION.value
+        and event["payload"]["observation"].get("tool_name") in {"self_review", "patch_review"}
+    ]
+    lines = [
+        "# Final Report",
+        "",
+        f"- Status: {result.status.value}",
+        f"- Success: {result.is_success()}",
+        f"- Summary: {result.summary}",
+        f"- Failure type: {result.failure_type or 'none'}",
+        f"- Failure stage: {result.failure_stage or 'none'}",
+        f"- Steps: {result.steps_taken}",
+        f"- Tokens: {result.total_tokens}",
+        "",
+        "## Modified Files",
+        "",
+        *[f"- {path}" for path in modified if path],
+        "",
+        "## Retrieval Candidates",
+        "",
+        *[
+            f"- {match.get('path')} score={match.get('score')} reasons={', '.join(match.get('reasons', []))}"
+            for item in retrievals
+            if item.get("type") == "hybrid_retrieval"
+            for match in item.get("matches", [])[:8]
+        ],
+        "",
+        "## Edit Plans",
+        "",
+        *[
+            f"- {item.get('patch', {}).get('path')}: risk={item.get('edit_plan', {}).get('risk_level')} intent={item.get('edit_plan', {}).get('change_intent')}"
+            for item in patches
+            if item.get("edit_plan")
+        ],
+        "",
+        "## Review Results",
+        "",
+        *[
+            f"- {review.get('tool_name')}: {review.get('status')} {review.get('metadata', {}).get('findings', [])}"
+            for review in reviews
+        ],
+        "",
+        "## Test Results",
+        "",
+        *[f"- {str(test).splitlines()[0][:180]}" for test in tests if test],
+        "",
+        "## Rollback",
+        "",
+        "Use `agent patch latest --artifact-dir <artifact_dir>` to inspect the latest patch metadata, then `agent patch rollback --artifact-dir <artifact_dir> --repo <repo>` to replay its reverse patch when available.",
+        "",
+        "## Metrics",
+        "",
+        f"- failure_analyses: {metrics.get('failure_analyses', 0)}",
+        f"- edit_plans: {metrics.get('edit_plans', 0)}",
+        f"- patch_review_failures: {metrics.get('patch_review_failures', 0)}",
+        f"- long_memory_hits: {metrics.get('long_memory_hits', 0)}",
+        f"- context_compressions: {metrics.get('context_compressions', 0)}",
+    ]
+    return "\n".join(lines) + "\n"
 
 
 def _finalize_manifest(

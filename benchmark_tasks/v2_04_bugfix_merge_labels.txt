@@ -1,0 +1,10 @@
+---
+repo: benchmark_fixtures/v2_suite
+category: bugfix
+difficulty: easy
+target_files: v2_cases.py
+test_cmd: python -m pytest test_v2_cases.py::test_merge_labels_keeps_base -q
+exclude_paths: logs, README.md
+expected_failure_type: verification_failed
+---
+Fix merge_labels so it preserves base labels and appends extra labels.

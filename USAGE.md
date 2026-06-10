@@ -301,6 +301,7 @@ agent run --task-file task.txt
 - `retrievals.json`：检索命中记录
 - `patches.json`：结构化 patch 轨迹
 - `result.json`：任务结果摘要
+- `final_report.md`：最终人类可读报告，包含候选检索、edit plan、review、测试和回滚方式
 - `final_diff.patch`：最终 diff（如果任务产生了改动）
 
 如果你要看一次运行到底“检索了什么、改了什么、测了什么”，优先看这个目录。
@@ -314,6 +315,9 @@ agent run --task-file task.txt
 - `auto_symbol_probes`
 - `long_memory_hits`
 - `context_compressions`
+- `failure_analyses`
+- `edit_plans`
+- `patch_review_failures`
 
 ### 典型使用场景
 
@@ -503,19 +507,60 @@ agent benchmark compare --left ./logs/baseline/artifacts --right ./logs/new/arti
 agent benchmark compare --left ./logs/baseline/artifacts --right ./logs/new/artifacts --markdown-out ./compare.md
 agent benchmark run --repo . --tasks-dir ./benchmark_tasks
 agent benchmark run --repo . --tasks-dir ./benchmark_tasks --task-glob "*.txt" --limit 2
+agent benchmark run --repo . --tasks-dir ./benchmark_tasks --task-glob "v2_*.txt" --mechanism-profile baseline
+agent benchmark run --repo . --tasks-dir ./benchmark_tasks --task-glob "v2_*.txt" --mechanism-profile full
+agent benchmark ablation-report --dir ./logs/artifacts --markdown-out ./ablation_report.md
+agent patch latest --artifact-dir ./logs/artifacts/<run_id>
+agent patch rollback --artifact-dir ./logs/artifacts/<run_id> --repo .
 agent benchmark patch-replay --artifact-dir ./logs/artifacts/<run_id> --repo ./benchmark_fixtures/run_demo
 agent benchmark reset-fixtures --repo .
 ```
 
 如果任务文件带 front matter，`benchmark run` 还会自动使用任务自己的 `repo`、`test_path`、`test_cmd`、`lint_cmd`、`patch_policy_cmd`、`exclude_paths`、`target_files`、`max_steps` 和 `finish_if_verified` 设置。`test_cmd` 会被封装成 `CommandGrader`；如果再声明 `lint_cmd` 或 `patch_policy_cmd`，则会自动组合成 `CompositeGrader`。
-每个任务每次运行前都会先复制到独立 workspace，再在 workspace 里跑 agent 和 grader。artifact 里的 `run_manifest.json` 会记录 `repo_source`、`workspace_repo`、模型配置、代码版本、任务文件 hash 和运行环境。仓库里推荐把 benchmark 任务指向 `benchmark_fixtures/`，把试玩或教学场景留给 `demo/`。
+每个任务每次运行前都会先复制到独立 workspace，再在 workspace 里跑 agent 和 grader。artifact 里的 `run_manifest.json` 会记录 `repo_source`、`workspace_repo`、模型配置、代码版本、任务文件 hash 和运行环境。仓库里推荐把任务和示例仓库统一放在 `benchmark_fixtures/` 下，方便 benchmark、试玩和恢复基线共用一套目录。
 默认的 `--skip-preverified` 会在进入 LLM 前先跑目标验证；如果任务已经是通过状态，就直接记成一次成功的 benchmark 工件，`steps=0`、`tokens=0`。
 如果你想排除这些预检直接通过的样本，在 `summarize` 或 `compare` 时加 `--only-agent-runs`。如果 benchmark 把 fixture 改脏了，可以用 `benchmark reset-fixtures` 恢复到未修复初始态。
-新的 benchmark 汇总还会显示 `graph_queries`、`patch_conflicts`、`patch_reverts`、`finish_verification_failures`、`self_review_failures`、`taxonomy_recovery_prompts`、`auto_symbol_probes`、`first_pass_success_rate`、`failure_type_distribution` 和 `failure_stage_distribution`。每条 run 也会输出 `failure_type`、`failure_stage`、`failure_message`，方便区分是 agent、grading、workspace 还是模型层出了问题。
+新的 benchmark 汇总还会显示 `graph_queries`、`patch_conflicts`、`patch_reverts`、`finish_verification_failures`、`self_review_failures`、`taxonomy_recovery_prompts`、`auto_symbol_probes`、`failure_analyses`、`edit_plans`、`patch_review_failures`、`first_pass_success_rate`、`failure_type_distribution` 和 `failure_stage_distribution`。每条 run 也会输出 `failure_type`、`failure_stage`、`failure_message`，方便区分是 agent、grading、workspace 还是模型层出了问题。
 Markdown report 现在使用固定模板，包含总成功率、任务数、平均 steps、平均 tokens、平均耗时、失败类型分布、每个任务结果、patch 文件和 baseline 对比。
 如果你想重放某次结构化 patch，可以直接用 `benchmark patch-replay`；加 `--reverse` 会重放对应的 `reverse_patch`。
 
 `benchmark run` 还会追加 `logs/memory/run_memory.jsonl`。这不是长期数据库，只是一份轻量 JSONL：记录 task、repo、test command、success、steps、failure taxonomy 和结果摘要，方便后续做经验检索或分析哪些任务类型最容易失败。
+
+### V2 运行模式与机制开关
+
+日常 run 支持三种模式：
+
+```bash
+agent run --task "修复 parser 空字符串问题" --run-mode safe
+agent run --task "修复 parser 空字符串问题" --run-mode review --confirm
+agent run --task "修复 parser 空字符串问题" --run-mode auto
+```
+
+机制开关用于消融实验或排查行为：
+
+```bash
+agent run --task "..." --disable-failure-analyzer
+agent run --task "..." --disable-hybrid-retrieval
+agent run --task "..." --disable-edit-plan
+agent run --task "..." --disable-self-review
+agent run --task "..." --disable-long-memory --disable-compression
+```
+
+V2 默认机制：
+- failure analyzer：解析 pytest output、traceback、tool failure，输出 failed tests、error type、traceback files、suspect symbols。
+- hybrid retrieval：综合失败分析、target files、关键词和符号命中，生成候选文件及 reasons。
+- edit plan：写操作前记录 `EDIT_PLAN`，包含 target files、修改意图、预期行为、风险和测试命令。
+- patch self-review：检查冲突标记、debug hook、测试文件修改、exclude paths、过大 patch。
+- final report：每次 run 导出 `final_report.md`。
+
+V2 benchmark 包含 30 个 `v2_*.txt` 分层任务，覆盖 `bugfix`、`edge_case`、`import_api`、`test_driven`、`refactor_safe`、`config_cli`。可以这样跑消融：
+
+```bash
+agent benchmark run --repo . --tasks-dir ./benchmark_tasks --task-glob "v2_*.txt" --mechanism-profile baseline
+agent benchmark run --repo . --tasks-dir ./benchmark_tasks --task-glob "v2_*.txt" --mechanism-profile partial
+agent benchmark run --repo . --tasks-dir ./benchmark_tasks --task-glob "v2_*.txt" --mechanism-profile full
+agent benchmark ablation-report --dir ./logs/artifacts --markdown-out ./ablation_report.md
+```
 
 ### 长记忆与上下文压缩
 

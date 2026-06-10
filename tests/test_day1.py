@@ -506,6 +506,17 @@ class TestArtifactExport:
                 },
             )
             log.log_observation(step=3, observation=graph_observation)
+            hybrid_observation = Observation(
+                status=ObservationStatus.SUCCESS,
+                output="candidates",
+                tool_name="hybrid_retrieval",
+                metadata={
+                    "query": "parser",
+                    "match_count": 1,
+                    "matches": [{"path": "main.py", "score": 10, "reasons": ["target_file"]}],
+                },
+            )
+            log.log_observation(step=3, observation=hybrid_observation)
             revert_observation = Observation(
                 status=ObservationStatus.SUCCESS,
                 output="Reverted patch on main.py",
@@ -535,6 +546,7 @@ class TestArtifactExport:
         assert (artifact_dir / "retrievals.json").exists()
         assert (artifact_dir / "patches.json").exists()
         assert (artifact_dir / "final_diff.patch").exists()
+        assert (artifact_dir / "final_report.md").exists()
 
         metrics = json.loads((artifact_dir / "metrics.json").read_text())
         assert metrics["task_success"] is True
@@ -652,6 +664,26 @@ class TestArtifactExport:
             log.log_reflection(step=1, reason="taxonomy_recovery", prompt="recover")
             log.log_reflection(step=1, reason="long_memory", prompt="memory")
             log.log_reflection(step=1, reason="context_compression", prompt="summary")
+            log.log_observation(
+                step=1,
+                observation=Observation(
+                    status=ObservationStatus.SUCCESS,
+                    output="analysis",
+                    tool_name="failure_analyzer",
+                    metadata={"summary": "analysis"},
+                ),
+            )
+            log.log_reflection(step=1, reason="edit_plan", prompt='{"risk_level":"low"}')
+            log.log_observation(
+                step=1,
+                observation=Observation(
+                    status=ObservationStatus.ERROR,
+                    output="Patch review found risk signals.",
+                    tool_name="patch_review",
+                    error="Patch review found risk signals.",
+                    metadata={"risk_level": "high", "findings": ["Patch modifies a test file"]},
+                ),
+            )
             log.log_task_failed(steps=1, reason="failed")
 
         result = RunResult(
@@ -671,3 +703,6 @@ class TestArtifactExport:
         assert metrics["auto_symbol_probes"] == 1
         assert metrics["long_memory_hits"] == 1
         assert metrics["context_compressions"] == 1
+        assert metrics["failure_analyses"] == 1
+        assert metrics["edit_plans"] == 1
+        assert metrics["patch_review_failures"] == 1

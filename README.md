@@ -31,7 +31,7 @@ agent chat
 - `Log: ...jsonl`：完整事件日志
 - `Artifacts: .../logs/artifacts/<task_id_timestamp>`：结构化运行工件目录
 
-如果你想先感受一下 `deepseek-ai/DeepSeek-V4-Flash` 的适用场景，可以直接看 `demo/flash_demo/`：
+如果你想先感受一下 `deepseek-ai/DeepSeek-V4-Flash` 的适用场景，可以直接看 `benchmark_fixtures/flash_demo/`：
 - 单文件、小范围 bug 修复
 - 测试快、反馈短
 - 很适合用 `apply_patch` 做最小修改
@@ -89,7 +89,12 @@ agent benchmark compare --left ./logs/baseline/artifacts --right ./logs/new/arti
 agent benchmark compare --left ./logs/baseline/artifacts --right ./logs/new/artifacts --only-agent-runs
 agent benchmark compare --left ./logs/baseline/artifacts --right ./logs/new/artifacts --markdown-out ./compare.md
 agent benchmark run --repo . --tasks-dir ./benchmark_tasks
+agent benchmark run --repo . --tasks-dir ./benchmark_tasks --task-glob "v2_*.txt" --mechanism-profile baseline
+agent benchmark run --repo . --tasks-dir ./benchmark_tasks --task-glob "v2_*.txt" --mechanism-profile full
+agent benchmark ablation-report --dir ./logs/artifacts --markdown-out ./ablation_report.md
 agent benchmark run --repo . --tasks-dir ./benchmark_tasks --task-glob "*.txt" --limit 2
+agent patch latest --artifact-dir ./logs/artifacts/<run_id>
+agent patch rollback --artifact-dir ./logs/artifacts/<run_id> --repo .
 agent benchmark patch-replay --artifact-dir ./logs/artifacts/<run_id> --repo ./benchmark_fixtures/run_demo
 agent benchmark reset-fixtures --repo .
 ```
@@ -101,6 +106,23 @@ agent benchmark reset-fixtures --repo .
 benchmark 汇总里还会额外统计 `graph_queries`、`patch_conflicts`、`patch_reverts`、`failure_type_distribution` 和 `failure_stage_distribution`。每次 run 除了 success 之外，也会导出 `failure_type`、`failure_stage` 和 `failure_message`，方便区分是 agent、grading、workspace 还是模型层出的问题。
 Markdown benchmark report 现在会输出固定模板：总成功率、任务数、平均 steps、平均 tokens、平均耗时、失败类型分布、每任务结果、patch 文件名，以及和 baseline 的对比。
 如果你想把某次结构化 patch 或它的 reverse patch 重放到仓库里，可以使用 `benchmark patch-replay`。
+
+V2 增强默认开启：failure analyzer 会解析 pytest/traceback/tool failure，hybrid retrieval 会综合 traceback files、target files、symbol/keyword 命中给出候选文件，写操作会记录 `EDIT_PLAN`，patch 后会做增强 self-review。每次 run 现在还会导出 `final_report.md`，包含修改文件、检索候选、edit plan、review 结果、测试结果和回滚方式。
+
+运行模式：
+- `--run-mode safe`：只分析和计划，不真正改文件
+- `--run-mode review`：生成 patch preview，等待确认后再应用
+- `--run-mode auto`：默认自动修改、验证、完成
+
+消融开关：
+- `--disable-failure-analyzer`
+- `--disable-hybrid-retrieval`
+- `--disable-edit-plan`
+- `--disable-self-review`
+- `--disable-long-memory`
+- `--disable-compression`
+
+benchmark 现在内置 `v2_*.txt` 分层任务，共 30 个，覆盖 `bugfix`、`edge_case`、`import_api`、`test_driven`、`refactor_safe`、`config_cli`。`--mechanism-profile baseline|partial|full` 可用于跑 baseline、部分机制和完整机制，`benchmark ablation-report` 会生成机制消融报告。
 
 agent 自身也会把 coding 能力相关的信号写入 artifacts 和 benchmark summary：
 - `finish_verification_attempts` / `finish_verification_failures`：模型喊 FINISH 后是否又被目标测试拉回修改循环
@@ -257,6 +279,7 @@ repo 通过 bind mount 双向同步，默认断网。
 - 自动导出 `events.json`、`metrics.json`、`retrievals.json`、`patches.json`
 - `patches.json` 记录 `reverse_patch`、冲突和回滚信息，便于 `benchmark patch-replay`
 - `metrics.json` 和 benchmark summary 会记录结束前验证、自审失败、taxonomy recovery、自动符号探测等能力指标
+- `final_report.md` 汇总成功状态、修改原因、候选检索、edit plan、review、测试和回滚方式
 - run / benchmark 会追加 `logs/memory/run_memory.jsonl`，沉淀任务、失败类型和运行摘要，方便后续做经验检索
 - 支持完整回放和基础 benchmark 指标分析
 

@@ -1,0 +1,10 @@
+---
+repo: benchmark_fixtures/v2_suite
+category: import_api
+difficulty: medium
+target_files: v2_cases.py
+test_cmd: python -m pytest test_v2_cases.py::test_build_url_normalizes_slashes -q
+exclude_paths: logs, README.md
+expected_failure_type: verification_failed
+---
+Fix build_url so it joins base URLs and paths with exactly one slash.
