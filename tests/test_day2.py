@@ -22,6 +22,7 @@ from agent.event_log import EventLog
 from agent.task import Action, ActionType, RunStatus, Task, ToolCall
 from llm.base import MockBackend
 from tools.base import FailingTool, NoopTool, ToolRegistry
+from tools.file_tool import ApplyPatchTool
 
 
 # ---------------------------------------------------------------------------
@@ -579,6 +580,7 @@ class TestLLMError:
 
         assert result.status == RunStatus.FAILED
         assert "API unreachable" in result.error
+        assert result.failure_type == "llm_error"
 
     def test_llm_error_logged(self, task, log, registry):
         from agent.task import EventType
@@ -592,6 +594,7 @@ class TestLLMError:
 
         events = log.replay()
         assert events[-1].event_type == EventType.TASK_FAILED
+        assert events[-1].payload["failure_type"] == "timeout"
 
 
 # ---------------------------------------------------------------------------
@@ -630,3 +633,52 @@ class TestUnknownTool:
         assert len(obs_events) >= 1
         obs = obs_events[0].payload["observation"]
         assert obs["status"] == "error"
+
+    def test_unknown_tool_then_give_up_is_tool_failure(self, task, log):
+        script = [
+            make_tool_call_action("ghost"),
+            make_give_up_action(),
+        ]
+        backend = MockBackend(script)
+        registry = ToolRegistry()
+        agent = Agent(backend, registry)
+
+        result = agent.run(task, log)
+
+        assert result.status == RunStatus.GAVE_UP
+        assert result.failure_type == "tool_failure"
+
+
+class TestFailureInference:
+    def test_patch_conflict_then_give_up_is_patch_conflict(self, tmp_path):
+        task = Task(
+            task_id="patchfail1",
+            description="Apply conflicting patch",
+            repo_path=str(tmp_path),
+            max_steps=5,
+        )
+        path = tmp_path / "target.py"
+        path.write_text("x = 1\n", encoding="utf-8")
+        log = EventLog.create(task, log_dir=str(tmp_path / "logs"))
+
+        registry = ToolRegistry()
+        registry.register(ApplyPatchTool())
+        script = [
+            make_tool_call_action(
+                "apply_patch",
+                {
+                    "patch_type": "replace_file",
+                    "path": str(path),
+                    "content": "x = 2\n",
+                    "expected_content": "stale\n",
+                },
+            ),
+            make_give_up_action("Patch failed"),
+        ]
+        backend = MockBackend(script)
+        agent = Agent(backend, registry)
+
+        result = agent.run(task, log)
+
+        assert result.status == RunStatus.GAVE_UP
+        assert result.failure_type == "patch_conflict"

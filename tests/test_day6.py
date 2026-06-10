@@ -856,6 +856,41 @@ class TestCliBenchmark:
         assert result.exit_code == 0, result.output
         assert "Tasks    : 1" in result.output
 
+    def test_benchmark_run_exports_workspace_error_artifact(self, tmp_path):
+        tasks_dir = tmp_path / "tasks"
+        tasks_dir.mkdir()
+        scoped_repo = tmp_path / "demo_repo"
+        scoped_repo.mkdir()
+        (tasks_dir / "task-a.txt").write_text(
+            "---\nrepo: demo_repo\n---\nFix task A",
+            encoding="utf-8",
+        )
+
+        runner = CliRunner()
+        with patch("entry.cli.load_config") as mock_cfg:
+            with patch("agent.benchmark.prepare_clean_workspace", side_effect=OSError("disk full")):
+                from config.schema import AppConfig
+                cfg = AppConfig()
+                cfg.agent.log_dir = str(tmp_path / "logs")
+                mock_cfg.return_value = cfg
+                result = runner.invoke(
+                    cli,
+                    [
+                        "benchmark", "run",
+                        "--repo", str(tmp_path),
+                        "--tasks-dir", str(tasks_dir),
+                    ],
+                    obj={},
+                )
+
+        assert result.exit_code == 0, result.output
+        assert "Workspace" in result.output
+        artifact_root = tmp_path / "logs" / "artifacts"
+        artifact_dirs = [p for p in artifact_root.iterdir() if p.is_dir()]
+        assert artifact_dirs
+        payload = (artifact_dirs[0] / "result.json").read_text(encoding="utf-8")
+        assert '"failure_type": "workspace_error"' in payload
+
 
 class TestBenchmarkTaskSpecs:
     def test_load_task_spec_plain_text(self, tmp_path):

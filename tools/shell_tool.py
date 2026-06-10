@@ -20,6 +20,7 @@ import re
 import subprocess
 from typing import Any, Callable
 
+from agent.failure import FAILURE_TYPE_TIMEOUT, FAILURE_TYPE_TOOL_FAILURE
 from tools.base import BaseTool, ToolResult
 from tools.runtime import LocalRuntime, Runtime
 
@@ -197,11 +198,19 @@ class ShellTool(BaseTool):
             # 区分 timeout 和普通错误，error 字段包含可读原因
             if "timed out" in result.stderr.lower():
                 error = result.stderr.strip()
+                failure_type = FAILURE_TYPE_TIMEOUT
             else:
                 error = f"Exit code: {result.returncode}"
+                failure_type = FAILURE_TYPE_TOOL_FAILURE
         else:
             error = None
-        return ToolResult(success=result.success, output=output, error=error)
+            failure_type = None
+        return ToolResult(
+            success=result.success,
+            output=output,
+            error=error,
+            failure_type=failure_type,
+        )
 
 
 # ---------------------------------------------------------------------------

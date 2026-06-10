@@ -138,7 +138,7 @@ source ~/.bashrc
 ### 2.3 验证配置
 
 ```bash
-python smoke_test.py
+python scripts/smoke_test.py
 ```
 
 看到 `✅ COMPLETE` 表示 API 联通、工具执行正常，可以开始使用。
@@ -667,7 +667,7 @@ agent run --task-file task.txt
 
 **Q：agent 没有任何输出，卡住了**
 
-先跑 `python smoke_test.py` 检查 API 是否联通。如果网络正常但还是卡，
+先跑 `python scripts/smoke_test.py` 检查 API 是否联通。如果网络正常但还是卡，
 可能是模型响应慢，加 `--verbose` 看详细日志：
 ```bash
 agent chat --verbose
@@ -797,7 +797,7 @@ pip install -e ".[dev]"
 export SILICONFLOW_API_KEY=sk-xxx
 
 # 验证
-python smoke_test.py
+python scripts/smoke_test.py
 
 # 日常使用
 cd your-project

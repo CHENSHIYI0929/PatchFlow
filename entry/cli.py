@@ -35,13 +35,13 @@ _ROOT = Path(__file__).parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from config.schema import load_config, merge_cli_overrides   # noqa: E402
-from llm.router import create_backend_from_config            # noqa: E402
-
-# 模块级 import（供 patch 使用）
 from config.schema import load_config, merge_cli_overrides  # noqa: E402
 from llm.router import create_backend_from_config           # noqa: E402
-from agent.failure import FAILURE_STAGE_GRADING, FAILURE_TYPE_VERIFICATION_FAILED  # noqa: E402
+from agent.failure import (  # noqa: E402
+    FAILURE_STAGE_PREVERIFY,
+    FAILURE_TYPE_WORKSPACE_ERROR,
+    failure,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -790,6 +790,7 @@ def benchmark_run(
         build_grader_for_spec,
         build_run_manifest,
         default_test_cmd_for_spec,
+        export_failed_benchmark_artifact,
         load_task_spec,
         prepare_clean_workspace,
         resolve_task_repo,
@@ -838,18 +839,49 @@ def benchmark_run(
         if not source_task_repo.exists():
             click.echo(red(f"Error: task repo path does not exist for {task_file.name}: {source_task_repo}"), err=True)
             sys.exit(1)
-        task_repo = prepare_clean_workspace(
-            source_task_repo,
-            workspace_root=workspace_root,
-            task_name=task_file.stem,
-        )
 
         run_config = config
         if spec.max_steps is not None and spec.max_steps != config.agent.max_steps:
             run_config = merge_cli_overrides(config, max_steps=spec.max_steps)
         grader = build_grader_for_spec(spec)
+        task_id = f"{task_file.stem}-{uuid.uuid4().hex[:8]}"
+        task_repo = source_task_repo
+        try:
+            task_repo = prepare_clean_workspace(
+                source_task_repo,
+                workspace_root=workspace_root,
+                task_name=task_file.stem,
+            )
+        except Exception as exc:
+            failure_info = failure(
+                f"Workspace setup failed: {exc}",
+                failure_type=FAILURE_TYPE_WORKSPACE_ERROR,
+                failure_stage=FAILURE_STAGE_PREVERIFY,
+            )
+            manifest = build_run_manifest(
+                task_id=task_id,
+                task_file=str(task_file),
+                task_repo=source_task_repo,
+                source_repo=repo_path,
+                workspace_repo=task_repo,
+                config=run_config,
+                grader=grader,
+                sandbox=sandbox,
+            )
+            _result, artifact_dir = export_failed_benchmark_artifact(
+                spec=spec,
+                repo_path=task_repo,
+                log_dir=run_config.agent.log_dir,
+                manifest=manifest,
+                failure=failure_info,
+            )
+            click.echo(bold(f"[{index}/{len(task_files)}] {task_file.name}"))
+            click.echo(red(f"  Workspace  : {exc}"))
+            click.echo(f"  Artifacts  : {artifact_dir}\n")
+            continue
+
         manifest = build_run_manifest(
-            task_id=f"{task_file.stem}-{uuid.uuid4().hex[:8]}",
+            task_id=task_id,
             task_file=str(task_file),
             task_repo=source_task_repo,
             source_repo=repo_path,
@@ -869,17 +901,38 @@ def benchmark_run(
         if spec.patch_policy_cmd:
             click.echo(dim(f"  Patch     : {spec.patch_policy_cmd}"))
 
-        preverify_runtime = create_runtime(sandbox=sandbox, repo_path=str(task_repo)) if sandbox else None
-        effective_spec = spec
-        if not skip_preverified:
-            effective_spec.skip_preverified = False
-        preverified = try_preverify_task(
-            effective_spec,
-            task_repo,
-            log_dir=run_config.agent.log_dir,
-            manifest=manifest,
-            runtime=preverify_runtime,
-        )
+        preverified = None
+        preverify_runtime = None
+        try:
+            preverify_runtime = create_runtime(sandbox=sandbox, repo_path=str(task_repo)) if sandbox else None
+            effective_spec = spec
+            if not skip_preverified:
+                effective_spec.skip_preverified = False
+            preverified = try_preverify_task(
+                effective_spec,
+                task_repo,
+                log_dir=run_config.agent.log_dir,
+                manifest=manifest,
+                runtime=preverify_runtime,
+            )
+        except Exception as exc:
+            failure_info = failure(
+                f"Preverify failed: {exc}",
+                failure_type=FAILURE_TYPE_WORKSPACE_ERROR,
+                failure_stage=FAILURE_STAGE_PREVERIFY,
+            )
+            _result, artifact_dir = export_failed_benchmark_artifact(
+                spec=spec,
+                repo_path=task_repo,
+                log_dir=run_config.agent.log_dir,
+                manifest=manifest,
+                failure=failure_info,
+            )
+            click.echo(red(f"  Preverify  : {exc}"))
+            click.echo(f"  Artifacts  : {artifact_dir}\n")
+            if preverify_runtime is not None:
+                preverify_runtime.cleanup()
+            continue
         if preverify_runtime is not None:
             preverify_runtime.cleanup()
         if preverified is not None:
@@ -890,24 +943,40 @@ def benchmark_run(
                 success_count += 1
             continue
 
-        result, _artifact_dir = _execute_run(
-            run_config,
-            task_repo,
-            spec.description,
-            task_file=str(task_file),
-            source_repo_path=str(source_task_repo),
-            manifest=manifest,
-            test_cmd=default_test_cmd_for_spec(spec),
-            exclude_paths=spec.exclude_paths,
-            target_files=spec.target_files,
-            finish_if_verified=spec.finish_if_verified,
-            grader=grader,
-            stream=stream,
-            confirm=confirm,
-            sandbox=sandbox,
-            verbose=verbose,
-            show_banner=False,
-        )
+        try:
+            result, _artifact_dir = _execute_run(
+                run_config,
+                task_repo,
+                spec.description,
+                task_file=str(task_file),
+                source_repo_path=str(source_task_repo),
+                manifest=manifest,
+                test_cmd=default_test_cmd_for_spec(spec),
+                exclude_paths=spec.exclude_paths,
+                target_files=spec.target_files,
+                finish_if_verified=spec.finish_if_verified,
+                grader=grader,
+                stream=stream,
+                confirm=confirm,
+                sandbox=sandbox,
+                verbose=verbose,
+                show_banner=False,
+            )
+        except Exception as exc:
+            failure_info = failure(
+                f"Run failed before completion: {exc}",
+                failure_type=FAILURE_TYPE_WORKSPACE_ERROR,
+                failure_stage=FAILURE_STAGE_PREVERIFY,
+            )
+            result, artifact_dir = export_failed_benchmark_artifact(
+                spec=spec,
+                repo_path=task_repo,
+                log_dir=run_config.agent.log_dir,
+                manifest=manifest,
+                failure=failure_info,
+            )
+            click.echo(red(f"  Run error  : {exc}"))
+            click.echo(f"  Artifacts  : {artifact_dir}\n")
         if result.is_success():
             success_count += 1
 

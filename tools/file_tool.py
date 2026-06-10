@@ -19,6 +19,11 @@ import os
 from pathlib import Path
 from typing import Any
 
+from agent.failure import (
+    FAILURE_TYPE_PATCH_CONFLICT,
+    FAILURE_TYPE_TOOL_FAILURE,
+    FAILURE_TYPE_WORKSPACE_ERROR,
+)
 from agent.patch import Patch
 from tools.base import BaseTool, ToolResult
 
@@ -80,7 +85,7 @@ class FileReadTool(BaseTool):
         try:
             lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError as e:
-            return ToolResult(success=False, output="", error=str(e))
+            return ToolResult(success=False, output="", error=str(e), failure_type=FAILURE_TYPE_WORKSPACE_ERROR)
 
         total = len(lines)
         truncated = total > MAX_READ_LINES
@@ -154,7 +159,7 @@ class FileViewTool(BaseTool):
         try:
             lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError as e:
-            return ToolResult(success=False, output="", error=str(e))
+            return ToolResult(success=False, output="", error=str(e), failure_type=FAILURE_TYPE_WORKSPACE_ERROR)
 
         total = len(lines)
         if start_line > total:
@@ -229,7 +234,7 @@ class FileWriteTool(BaseTool):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
         except OSError as e:
-            return ToolResult(success=False, output="", error=str(e))
+            return ToolResult(success=False, output="", error=str(e), failure_type=FAILURE_TYPE_WORKSPACE_ERROR)
 
         line_count = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
         return ToolResult(
@@ -318,27 +323,40 @@ class ApplyPatchTool(BaseTool):
         try:
             patch = Patch.from_params(params)
         except ValueError as e:
-            return ToolResult(success=False, output="", error=str(e))
+            return ToolResult(success=False, output="", error=str(e), failure_type=FAILURE_TYPE_TOOL_FAILURE)
 
         path = patch.target_path()
         before = ""
         existed = path.exists()
         if existed:
             if not path.is_file():
-                return ToolResult(success=False, output="", error=f"Not a file: {path}")
+                return ToolResult(success=False, output="", error=f"Not a file: {path}", failure_type=FAILURE_TYPE_TOOL_FAILURE)
             try:
                 before = path.read_text(encoding="utf-8", errors="replace")
             except OSError as e:
-                return ToolResult(success=False, output="", error=str(e))
+                return ToolResult(success=False, output="", error=str(e), failure_type=FAILURE_TYPE_WORKSPACE_ERROR)
 
         try:
             after, stats = self._apply(patch, before, existed)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(after, encoding="utf-8")
         except ValueError as e:
-            return ToolResult(success=False, output="", error=str(e), metadata={"patch": patch.to_dict()})
+            failure_type = FAILURE_TYPE_PATCH_CONFLICT if "conflict" in str(e).lower() else FAILURE_TYPE_TOOL_FAILURE
+            return ToolResult(
+                success=False,
+                output="",
+                error=str(e),
+                metadata={"patch": patch.to_dict()},
+                failure_type=failure_type,
+            )
         except OSError as e:
-            return ToolResult(success=False, output="", error=str(e), metadata={"patch": patch.to_dict()})
+            return ToolResult(
+                success=False,
+                output="",
+                error=str(e),
+                metadata={"patch": patch.to_dict()},
+                failure_type=FAILURE_TYPE_WORKSPACE_ERROR,
+            )
 
         line_count = after.count("\n") + (1 if after and not after.endswith("\n") else 0)
         metadata = {
@@ -463,5 +481,5 @@ class RevertPatchTool(BaseTool):
     def execute(self, params: dict[str, Any]) -> ToolResult:
         reverse_patch = params.get("reverse_patch")
         if not isinstance(reverse_patch, dict):
-            return ToolResult(success=False, output="", error="reverse_patch is required")
+            return ToolResult(success=False, output="", error="reverse_patch is required", failure_type=FAILURE_TYPE_TOOL_FAILURE)
         return ApplyPatchTool().execute(reverse_patch)

@@ -1,8 +1,8 @@
 """
-smoke_test.py
+scripts/smoke_test.py
 
 端到端冒烟测试，放在项目根目录运行：
-    python smoke_test.py
+    python scripts/smoke_test.py
 
 测试内容：
 1. 用真实 LLM（从 config/default.yaml 读配置）

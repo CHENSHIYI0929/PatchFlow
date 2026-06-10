@@ -36,15 +36,19 @@ class ToolResult:
     output: str                         # 工具的文本输出，已做截断处理
     error: str | None = None            # 失败时的错误信息
     metadata: dict[str, Any] | None = None
+    failure_type: str | None = None
 
     def to_observation(self, tool_name: str) -> Observation:
         """转换为 Observation，供 core.py 写入 EventLog 和注入上下文。"""
+        metadata = dict(self.metadata or {})
+        if self.failure_type and "failure_type" not in metadata:
+            metadata["failure_type"] = self.failure_type
         return Observation(
             status=ObservationStatus.SUCCESS if self.success else ObservationStatus.ERROR,
             output=self.output,
             tool_name=tool_name,
             error=self.error,
-            metadata=self.metadata or {},
+            metadata=metadata,
         )
 
 
@@ -140,6 +144,7 @@ class ToolRegistry:
                 success=False,
                 output="",
                 error=f"Unknown tool '{name}'. Available tools: {available}",
+                failure_type="tool_failure",
             )
 
         tool = self._tools[name]
@@ -151,6 +156,7 @@ class ToolRegistry:
                 success=False,
                 output="",
                 error=f"Tool '{name}' raised an unexpected error: {exc}",
+                failure_type="tool_failure",
             )
 
     def get_schemas(self) -> list[LLMToolSchema]:

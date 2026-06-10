@@ -19,6 +19,7 @@ from typing import Any
 
 from agent.artifacts import export_run_artifacts
 from agent.event_log import EventLog
+from agent.failure import FailureInfo
 from agent.grader import CommandGrader, CompositeGrader, Grader
 from agent.task import Observation, ObservationStatus, RunResult, RunStatus, Task
 from tools.runtime import LocalRuntime, Runtime
@@ -202,6 +203,45 @@ def prepare_clean_workspace(
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache", "logs", "artifacts"),
     )
     return workspace
+
+
+def export_failed_benchmark_artifact(
+    *,
+    spec: BenchmarkTaskSpec,
+    repo_path: str | Path,
+    log_dir: str,
+    manifest: dict[str, Any] | None,
+    failure: FailureInfo,
+) -> tuple[RunResult, Path]:
+    repo = Path(repo_path).resolve()
+    task = Task(
+        description=spec.description,
+        repo_path=str(repo),
+        source_repo_path=str(repo),
+        task_id=(manifest or {}).get("task_id") or str(uuid.uuid4())[:8],
+        task_file=str(spec.path),
+        test_cmd=default_test_cmd_for_spec(spec),
+        exclude_paths=spec.exclude_paths or [],
+        target_files=spec.target_files or [],
+        finish_if_verified=spec.finish_if_verified,
+        max_steps=spec.max_steps or 0,
+    )
+    result = RunResult(
+        task_id=task.task_id,
+        status=RunStatus.FAILED,
+        summary=failure.reason,
+        steps_taken=0,
+        total_tokens=0,
+        error=failure.failure_message,
+        failure_type=failure.failure_type,
+        failure_stage=failure.failure_stage,
+        failure_message=failure.failure_message,
+    )
+    with EventLog.create(task, log_dir=log_dir) as log:
+        log.log_task_start(task)
+        log.log_task_failed(steps=0, **failure.to_dict())
+        artifact_dir = export_run_artifacts(log, result, 0.0, manifest=manifest)
+    return result, artifact_dir
 
 
 def build_run_manifest(

@@ -25,6 +25,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from agent.event_log import EventLog
+from agent.failure import (
+    FAILURE_STAGE_AGENT_LOOP,
+    classify_exception_failure,
+    failure,
+    infer_failure_from_event_dicts,
+    normalize_agent_loop_failure,
+)
 from context.history import ConversationHistory
 from context.repo_map import RepoMap
 from context.token_budget import TokenBudget
@@ -42,15 +49,6 @@ from llm.base import LLMBackend, LLMMessage, LLMToolSchema
 from tools.base import ToolRegistry
 
 logger = logging.getLogger(__name__)
-
-
-def _failure(reason: str, *, failure_type: str, failure_stage: str) -> dict[str, str]:
-    return {
-        "reason": reason,
-        "failure_type": failure_type,
-        "failure_stage": failure_stage,
-        "failure_message": reason,
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -176,12 +174,12 @@ class Agent:
                 response = self._call_with_retry(messages, tools)
             except Exception as exc:
                 logger.error("LLM call failed at step %d after retries: %s", step, exc)
-                failure = _failure(
+                failure_info = failure(
                     f"LLM error: {exc}",
-                    failure_type="llm_error",
-                    failure_stage="agent_loop",
+                    failure_type=classify_exception_failure(exc),
+                    failure_stage=FAILURE_STAGE_AGENT_LOOP,
                 )
-                log.log_task_failed(steps=step, **failure)
+                log.log_task_failed(steps=step, **failure_info.to_dict())
                 return RunResult(
                     task_id=task.task_id,
                     status=RunStatus.FAILED,
@@ -189,9 +187,9 @@ class Agent:
                     steps_taken=step,
                     total_tokens=total_tokens,
                     error=str(exc),
-                    failure_type=failure["failure_type"],
-                    failure_stage=failure["failure_stage"],
-                    failure_message=failure["failure_message"],
+                    failure_type=failure_info.failure_type,
+                    failure_stage=failure_info.failure_stage,
+                    failure_message=failure_info.failure_message,
                 )
 
             total_tokens += response.total_tokens
@@ -205,17 +203,17 @@ class Agent:
             if self._is_looping(log):
                 reason = f"Loop detected: same action repeated {self._cfg.loop_detection_window} times"
                 logger.warning(reason)
-                failure = _failure(reason, failure_type="loop_detected", failure_stage="agent_loop")
-                log.log_task_failed(steps=step, **failure)
+                failure_info = self._infer_failure_from_log(log, reason)
+                log.log_task_failed(steps=step, **failure_info.to_dict())
                 return RunResult(
                     task_id=task.task_id,
                     status=RunStatus.GAVE_UP,
                     summary=reason,
                     steps_taken=step,
                     total_tokens=total_tokens,
-                    failure_type=failure["failure_type"],
-                    failure_stage=failure["failure_stage"],
-                    failure_message=failure["failure_message"],
+                    failure_type=failure_info.failure_type,
+                    failure_stage=failure_info.failure_stage,
+                    failure_message=failure_info.failure_message,
                 )
 
             # ── 4. 终止 action ──────────────────────────────────────────
@@ -234,17 +232,17 @@ class Agent:
 
             if action.action_type == ActionType.GIVE_UP:
                 reason = action.message or "Agent gave up."
-                failure = _failure(reason, failure_type="agent_gave_up", failure_stage="agent_loop")
-                log.log_task_failed(steps=step, **failure)
+                failure_info = self._infer_failure_from_log(log, reason)
+                log.log_task_failed(steps=step, **failure_info.to_dict())
                 return RunResult(
                     task_id=task.task_id,
                     status=RunStatus.GAVE_UP,
                     summary=reason,
                     steps_taken=step,
                     total_tokens=total_tokens,
-                    failure_type=failure["failure_type"],
-                    failure_stage=failure["failure_stage"],
-                    failure_message=failure["failure_message"],
+                    failure_type=failure_info.failure_type,
+                    failure_stage=failure_info.failure_stage,
+                    failure_message=failure_info.failure_message,
                 )
 
             # ── 5. 执行工具 ─────────────────────────────────────────────
@@ -340,17 +338,17 @@ class Agent:
 
         # ── 7. 超出步数上限 ─────────────────────────────────────────────
         reason = f"Reached max_steps limit ({task.max_steps})"
-        failure = _failure(reason, failure_type="max_steps", failure_stage="agent_loop")
-        log.log_task_failed(steps=task.max_steps, **failure)
+        failure_info = self._infer_failure_from_log(log, reason)
+        log.log_task_failed(steps=task.max_steps, **failure_info.to_dict())
         return RunResult(
             task_id=task.task_id,
             status=RunStatus.MAX_STEPS,
             summary=reason,
             steps_taken=task.max_steps,
             total_tokens=total_tokens,
-            failure_type=failure["failure_type"],
-            failure_stage=failure["failure_stage"],
-            failure_message=failure["failure_message"],
+            failure_type=failure_info.failure_type,
+            failure_stage=failure_info.failure_stage,
+            failure_message=failure_info.failure_message,
         )
 
     # ------------------------------------------------------------------
@@ -815,3 +813,21 @@ class Agent:
         preferred = [item for item in ranked_related if item["path"] in target_set]
         remaining = [item for item in ranked_related if item["path"] not in target_set]
         return synthetic + preferred + remaining
+
+    def _infer_failure_from_log(self, log: EventLog, reason: str):
+        inferred = infer_failure_from_event_dicts(
+            [event.to_dict() for event in log.replay()],
+            default_stage=FAILURE_STAGE_AGENT_LOOP,
+        )
+        if inferred is not None:
+            return failure(
+                reason,
+                failure_type=inferred.failure_type,
+                failure_stage=inferred.failure_stage,
+                failure_message=inferred.failure_message,
+            )
+        return failure(
+            reason,
+            failure_type=normalize_agent_loop_failure(reason),
+            failure_stage=FAILURE_STAGE_AGENT_LOOP,
+        )

@@ -2,7 +2,7 @@
 
 自主编程智能体。给它一个任务描述，它会自己探索代码库、检索上下文、优先用结构化 patch 修改文件、运行测试，直到完成。
 
-它现在不是单纯的“会改文件”工具，而是一个可评测 coding agent 平台，已经把任务 manifest、benchmark 分层、图结构代码理解、patch 回滚 / 冲突 / 重放，以及运行工件和统计分析都接了起来。
+它不是单纯的“会改文件”工具，而是一个可评测 coding agent 平台，已经把任务 manifest、benchmark 分层、图结构代码理解、patch 回滚 / 冲突 / 重放，以及运行工件和统计分析都接了起来。
 
 支持 **Claude、DeepSeek、OpenAI、Groq、Ollama** 多种模型，内置流式输出、Docker 沙箱、GitHub Issue 自动修复。
 
@@ -12,7 +12,7 @@
 
 ```bash
 # 安装
-git clone <repo-url> && cd coding-agent
+git clone <repo-url> && cd PatchFlow
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
@@ -20,7 +20,7 @@ pip install -e ".[dev]"
 export SILICONFLOW_API_KEY=sk-xxx   # 或 ANTHROPIC_API_KEY / OPENAI_API_KEY
 
 # 验证
-python smoke_test.py
+python scripts/smoke_test.py
 
 # 使用
 cd your-project
@@ -139,7 +139,7 @@ context:
 ## 项目结构
 
 ```
-coding-agent/
+PatchFlow/
 ├── agent/              # 核心：ReAct 主循环、事件日志、数据结构
 │   ├── core.py         # Agent 类，驱动整个运行循环
 │   ├── task.py         # Task / Action / Observation / RunResult 数据类
@@ -177,9 +177,12 @@ coding-agent/
 │   ├── default.yaml    # 默认配置
 │   └── schema.py       # 配置加载与校验
 │
-├── tests/              # 376 个测试，覆盖所有模块
-├── smoke_test.py       # 端到端联通验证
-├── quicksort_task.py   # 示例任务脚本
+├── tests/              # 测试覆盖核心模块
+├── scripts/
+│   └── smoke_test.py   # 端到端联通验证
+├── examples/
+│   ├── quicksort.py    # 独立算法示例
+│   └── linked_list.py  # 独立数据结构示例
 └── USAGE.md            # 完整使用教程
 ```
 
@@ -252,7 +255,7 @@ repo 通过 bind mount 双向同步，默认断网。
 pip install -e ".[dev]"
 
 # 运行测试
-pytest                     # 全量（376 passed，7 skipped）
+pytest                     # 全量
 pytest tests/test_day3.py  # 单个文件
 
 # 可选：更多语言的 tree-sitter 支持

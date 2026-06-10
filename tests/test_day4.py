@@ -261,6 +261,7 @@ class TestAnthropicBackend:
         return block
 
     def _make_backend(self):
+        pytest.importorskip("anthropic")
         with patch("anthropic.Anthropic"):
             from llm.anthropic_backend import AnthropicBackend
             backend = AnthropicBackend(model="claude-sonnet-4-5", api_key="sk-test")
