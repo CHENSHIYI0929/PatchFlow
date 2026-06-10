@@ -32,15 +32,19 @@ from agent.failure import (
     infer_failure_from_event_dicts,
     normalize_agent_loop_failure,
 )
+from agent.memory import format_memory_hits, search_memories
 from context.history import ConversationHistory
 from context.repo_map import RepoMap
 from context.token_budget import TokenBudget
 from agent.prompt import (
     build_system_prompt,
     build_task_prompt,
+    recovery_prompt_for_failure,
     reflection_no_edit,
     reflection_test_failed,
+    reflection_verification_failed,
 )
+from agent.review import review_patch_before_finish
 from agent.task import (
     Action, ActionType, Event, EventType,
     Observation, ObservationStatus, RunResult, RunStatus, Task, ToolCall,
@@ -69,6 +73,14 @@ class AgentConfig:
     auto_graph_probe_on_test_failure: bool = True   # 测试失败后自动探测图邻居
     auto_graph_probe_limit: int = 2                # 最多自动探测的候选文件数
     auto_file_prefetch_on_test_failure: bool = True  # 测试失败后自动预读第一候选文件
+    auto_symbol_probe_on_test_failure: bool = True  # 测试失败后自动定位相关函数/类定义
+    verify_on_finish: bool = True                   # FINISH 前用 task.test_cmd 做最后验证
+    self_review_on_finish: bool = True              # FINISH 前检查 diff 中的明显阻断问题
+    taxonomy_recovery_prompts: bool = True          # 根据 failure_type 注入恢复提示
+    enable_context_compression: bool = True         # 历史超窗时压缩旧消息
+    enable_long_memory: bool = True                 # 运行开始时检索本地长期记忆
+    long_memory_limit: int = 5                      # 每次注入的长期记忆条数上限
+    log_dir: str = "./logs"                         # memory/artifact 默认日志目录
     stream: bool = False                   # 是否启用流式输出
     stream_callback: object = None         # StreamCallback，最终回答流式回调
     thought_callback: object = None        # StreamCallback，推理过程流式回调（推理模型专用）
@@ -133,7 +145,10 @@ class Agent:
         if hasattr(self, "_pending_history") and self._pending_history is not None:
             history = self._pending_history
         else:
-            history = ConversationHistory(max_messages=self._cfg.history_max_messages)
+            history = ConversationHistory(
+                max_messages=self._cfg.history_max_messages,
+                enable_compression=self._cfg.enable_context_compression,
+            )
             # 单次模式：把任务描述作为第一条 user 消息
             from agent.prompt import build_task_prompt
             history.add(LLMMessage(
@@ -147,6 +162,7 @@ class Agent:
                     target_files=task.target_files,
                 ),
             ))
+        self._inject_long_memory(task, log, history)
         token_budget = TokenBudget(total=self._cfg.budget_tokens)
         repo_map = RepoMap(task.repo_path, exclude_paths=task.exclude_paths)
         repo_map_budget = token_budget.default_plan().repo_map
@@ -162,11 +178,19 @@ class Agent:
         total_tokens = 0
         steps_without_edit = 0
         edits_made = False
+        logged_compressed_count = history.compressed_message_count
 
         for step in range(1, task.max_steps + 1):
             logger.debug("Step %d/%d", step, task.max_steps)
 
             # ── 1. 组装 messages，调用 LLM ──────────────────────────────
+            if history.compressed_message_count > logged_compressed_count:
+                log.log_reflection(
+                    step=step,
+                    reason="context_compression",
+                    prompt=history.compressed_summary,
+                )
+                logged_compressed_count = history.compressed_message_count
             messages = self._build_messages(history, token_budget, repo_map)
             tools = self._registry.get_schemas()
 
@@ -220,6 +244,21 @@ class Agent:
             if action.action_type == ActionType.FINISH:
                 summary = action.message or "Task complete."
                 patch = self._get_git_diff(task.repo_path)
+                if self._should_continue_after_self_review(
+                    task=task,
+                    step=step,
+                    patch=patch,
+                    log=log,
+                    history=history,
+                ):
+                    continue
+                if self._should_continue_after_finish_verification(
+                    task=task,
+                    step=step,
+                    log=log,
+                    history=history,
+                ):
+                    continue
                 log.log_task_complete(steps=step, summary=summary)
                 return RunResult(
                     task_id=task.task_id,
@@ -270,6 +309,14 @@ class Agent:
                     content=self._format_observation_for_history(observation),
                 ))
 
+                self._maybe_inject_taxonomy_recovery(
+                    step=step,
+                    observation=observation,
+                    log=log,
+                    history=history,
+                    skip_for_test_failure=tc.name in self._cfg.test_tool_names,
+                )
+
                 if self._should_finish_after_verification(
                     task,
                     tool_call=tc,
@@ -301,6 +348,13 @@ class Agent:
                         task=task,
                         step=step,
                         tool_call=tc,
+                        observation=observation,
+                        log=log,
+                        history=history,
+                    )
+                    self._auto_probe_symbols(
+                        task=task,
+                        step=step,
                         observation=observation,
                         log=log,
                         history=history,
@@ -384,6 +438,26 @@ class Agent:
             messages.append(LLMMessage(role=d["role"], content=d["content"]))
         return messages
 
+    def _inject_long_memory(
+        self,
+        task: Task,
+        log: EventLog,
+        history: ConversationHistory,
+    ) -> None:
+        if not self._cfg.enable_long_memory or self._cfg.long_memory_limit <= 0:
+            return
+        hits = search_memories(
+            self._cfg.log_dir,
+            query=task.description,
+            repo_path=task.source_repo_path or task.repo_path,
+            limit=self._cfg.long_memory_limit,
+        )
+        memory_text = format_memory_hits(hits)
+        if not memory_text:
+            return
+        log.log_reflection(step=0, reason="long_memory", prompt=memory_text)
+        history.add(LLMMessage(role="user", content=memory_text))
+
     def _format_action_for_history(self, action: Action) -> str:
         """把 Action 格式化为 assistant 消息，写入对话历史。"""
         parts = [f"Thought: {action.thought}"]
@@ -426,6 +500,102 @@ class Agent:
             a.tool_call.name == first.name and a.tool_call.params == first.params
             for a in recent[1:]
         )
+
+    def _should_continue_after_self_review(
+        self,
+        *,
+        task: Task,
+        step: int,
+        patch: str | None,
+        log: EventLog,
+        history: ConversationHistory,
+    ) -> bool:
+        if not self._cfg.self_review_on_finish:
+            return False
+        review = review_patch_before_finish(patch or self._collect_recent_patch_text(log))
+        observation = Observation(
+            status=ObservationStatus.SUCCESS if review.success else ObservationStatus.ERROR,
+            output=review.message,
+            tool_name="self_review",
+            error=None if review.success else review.message,
+            metadata=review.to_metadata(),
+        )
+        log.log_observation(step=step, observation=observation)
+        if review.success:
+            return False
+
+        history.add(LLMMessage(role="assistant", content="Finish requested, but self-review found blocking issues."))
+        history.add(LLMMessage(role="user", content=self._format_observation_for_history(observation)))
+        prompt = (
+            "[REFLECTION] Self-review found blocking issues in the diff. "
+            "Fix these findings before finishing:\n"
+            + "\n".join(f"- {finding}" for finding in review.findings)
+        )
+        log.log_reflection(step=step, reason="self_review_failed", prompt=prompt)
+        history.add(LLMMessage(role="user", content=prompt))
+        return True
+
+    def _collect_recent_patch_text(self, log: EventLog) -> str | None:
+        latest: str | None = None
+        for event in log.replay():
+            if event.event_type != EventType.OBSERVATION:
+                continue
+            obs = event.payload.get("observation", {})
+            metadata = obs.get("metadata") or {}
+            patch = metadata.get("patch") or {}
+            if isinstance(patch, dict):
+                for key in ("content", "replace"):
+                    value = patch.get(key)
+                    if isinstance(value, str):
+                        latest = value
+        return latest
+
+    def _should_continue_after_finish_verification(
+        self,
+        *,
+        task: Task,
+        step: int,
+        log: EventLog,
+        history: ConversationHistory,
+    ) -> bool:
+        if not self._cfg.verify_on_finish or not task.test_cmd or "shell" not in self._registry:
+            return False
+        result = self._registry.execute_tool(
+            "shell",
+            {"cmd": task.test_cmd, "cwd": task.repo_path, "timeout": 120},
+        )
+        if result.metadata is None:
+            result.metadata = {}
+        result.metadata["verification_cmd"] = task.test_cmd
+        result.metadata["cwd"] = task.repo_path
+        observation = result.to_observation("finish_verifier")
+        log.log_observation(step=step, observation=observation)
+        if observation.is_success():
+            return False
+
+        history.add(LLMMessage(role="assistant", content="Finish requested, but target verification failed."))
+        history.add(LLMMessage(role="user", content=self._format_observation_for_history(observation)))
+        reflect_prompt = reflection_verification_failed()
+        log.log_reflection(step=step, reason="finish_verification_failed", prompt=reflect_prompt)
+        history.add(LLMMessage(role="user", content=reflect_prompt))
+        return True
+
+    def _maybe_inject_taxonomy_recovery(
+        self,
+        *,
+        step: int,
+        observation: Observation,
+        log: EventLog,
+        history: ConversationHistory,
+        skip_for_test_failure: bool,
+    ) -> None:
+        if not self._cfg.taxonomy_recovery_prompts or observation.is_success() or skip_for_test_failure:
+            return
+        prompt = recovery_prompt_for_failure((observation.metadata or {}).get("failure_type"))
+        if not prompt:
+            return
+        log.log_reflection(step=step, reason="taxonomy_recovery", prompt=prompt)
+        history.add(LLMMessage(role="user", content=prompt))
 
     def _call_with_retry(
         self,
@@ -701,6 +871,59 @@ class Agent:
             role="user",
             content=self._format_observation_for_history(prefetch_observation),
         ))
+
+    def _auto_probe_symbols(
+        self,
+        *,
+        task: Task,
+        step: int,
+        observation: Observation,
+        log: EventLog,
+        history: ConversationHistory,
+    ) -> None:
+        if not self._cfg.auto_symbol_probe_on_test_failure:
+            return
+        if "find_symbol" not in self._registry:
+            return
+        symbols = self._candidate_symbol_names(observation)
+        if not symbols:
+            return
+        for symbol in symbols[:2]:
+            result = self._registry.execute_tool(
+                "find_symbol",
+                {"symbol": symbol, "path": task.repo_path},
+            )
+            if result.metadata is None:
+                result.metadata = {}
+            result.metadata["auto_symbol_probe"] = True
+            result.metadata["probe_symbol"] = symbol
+            symbol_observation = result.to_observation("find_symbol")
+            log.log_observation(step=step, observation=symbol_observation)
+            history.add(LLMMessage(
+                role="user",
+                content=self._format_observation_for_history(symbol_observation),
+            ))
+
+    def _candidate_symbol_names(self, observation: Observation) -> list[str]:
+        text = "\n".join(part for part in [observation.output, observation.error or ""] if part)
+        candidates: list[str] = []
+        patterns = [
+            r"NameError: name ['\"]([A-Za-z_]\w*)['\"]",
+            r"AttributeError: .*['\"]([A-Za-z_]\w*)['\"]",
+            r"FAILED [\w./-]+::([A-Za-z_]\w*)",
+            r"in ([A-Za-z_]\w*)\n",
+        ]
+        for pattern in patterns:
+            candidates.extend(re.findall(pattern, text))
+        ignored = {"test", "assert", "self", "None", "True", "False"}
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for symbol in candidates:
+            if symbol in ignored or symbol in seen:
+                continue
+            deduped.append(symbol)
+            seen.add(symbol)
+        return deduped
 
     def _candidate_graph_paths(
         self,

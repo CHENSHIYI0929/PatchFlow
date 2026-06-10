@@ -220,6 +220,10 @@ def _execute_run(
         max_steps=config.agent.max_steps,
         budget_tokens=config.agent.budget_tokens,
         history_max_messages=config.context.history_window * 2,
+        enable_context_compression=config.context.enable_compression,
+        enable_long_memory=config.context.enable_long_memory,
+        long_memory_limit=config.context.long_memory_limit,
+        log_dir=config.agent.log_dir,
         stream=stream,
         stream_callback=_stream_cb if stream else None,
         thought_callback=_thought_cb if stream else None,
@@ -292,7 +296,9 @@ def _execute_run(
 
         elapsed = time.time() - t0
         from agent.artifacts import export_run_artifacts
+        from agent.memory import append_run_memory
         artifact_dir = export_run_artifacts(log, result, elapsed, manifest=manifest)
+        append_run_memory(config.agent.log_dir, task_obj, result)
     finally:
         if runtime is not None:
             runtime.cleanup()
@@ -693,6 +699,13 @@ def benchmark_summarize(
     click.echo(f"  Patch success rate : {summary['patch_success_rate']:.2%}\n")
     click.echo(f"  Patch conflicts    : {summary['patch_conflicts']}")
     click.echo(f"  Patch reverts      : {summary['patch_reverts']}\n")
+    click.echo(f"  First-pass success : {summary['first_pass_success_rate']:.2%}")
+    click.echo(f"  Finish verify fails: {summary['finish_verification_failures']}")
+    click.echo(f"  Self-review fails  : {summary['self_review_failures']}")
+    click.echo(f"  Recovery prompts   : {summary['taxonomy_recovery_prompts']}")
+    click.echo(f"  Auto symbol probes : {summary['auto_symbol_probes']}\n")
+    click.echo(f"  Long memory hits   : {summary['long_memory_hits']}")
+    click.echo(f"  Context compressions: {summary['context_compressions']}\n")
     if markdown_out:
         click.echo(f"  Markdown report    : {markdown_out}\n")
 
@@ -1151,6 +1164,13 @@ def _render_benchmark_summary_markdown(summary: dict) -> str:
             f"| Patch success rate | {summary['patch_success_rate']:.2%} |",
             f"| Patch conflicts | {summary['patch_conflicts']} |",
             f"| Patch reverts | {summary['patch_reverts']} |",
+            f"| First-pass success rate | {summary['first_pass_success_rate']:.2%} |",
+            f"| Finish verification failures | {summary['finish_verification_failures']} |",
+            f"| Self-review failures | {summary['self_review_failures']} |",
+            f"| Recovery prompts | {summary['taxonomy_recovery_prompts']} |",
+            f"| Auto symbol probes | {summary['auto_symbol_probes']} |",
+            f"| Long memory hits | {summary['long_memory_hits']} |",
+            f"| Context compressions | {summary['context_compressions']} |",
             "",
             "## Failure Type Distribution",
             "",

@@ -305,6 +305,16 @@ agent run --task-file task.txt
 
 如果你要看一次运行到底“检索了什么、改了什么、测了什么”，优先看这个目录。
 
+如果任务配置了 `test_cmd`，agent 在模型输出 FINISH 后还会自动再跑一次目标验证；验证失败不会立刻结束，而是把失败输出作为新反馈喂回模型继续修。结束前还会对最终 patch 做轻量自审，拦截冲突标记、`breakpoint()`、`pdb.set_trace()` 等明显不该提交的内容。
+
+`metrics.json` 会额外记录这些 coding 能力信号：
+- `finish_verification_attempts` / `finish_verification_failures`
+- `self_review_attempts` / `self_review_failures`
+- `taxonomy_recovery_prompts`
+- `auto_symbol_probes`
+- `long_memory_hits`
+- `context_compressions`
+
 ### 典型使用场景
 
 ```bash
@@ -440,8 +450,11 @@ cat logs/artifacts/abc12345_20250525_143022/metrics.json | jq '.'
 - retrieval 命中分析
 - graph_neighbors 关系分析
 - 失败后自动图探测 / 自动 file prefetch 的轨迹分析
+- 测试失败后的自动 `find_symbol` 符号探测轨迹分析
 - patch 成功率统计
 - patch 冲突 / 回滚统计
+- FINISH 前验证、自审和 taxonomy recovery 触发次数
+- 长期记忆命中和上下文压缩触发次数
 - benchmark 汇总
 
 ### 看图效果
@@ -476,6 +489,8 @@ flowchart LR
 
 这条链路里最值得看的，就是图分析有没有把 `file_read` 的对象选对，以及后续 `apply_patch` 是否只改了最小范围。
 
+如果一次测试失败输出里包含函数名、类名或 pytest 的测试名，agent 还会自动尝试 `find_symbol`。这能把“看报错猜文件”推进到“用符号索引定位定义”，对应事件会在 `retrievals.json` 和 `metrics.json` 里体现为 `auto_symbol_probe` / `auto_symbol_probes`。
+
 如果你想直接看多次运行的整体结果：
 
 ```bash
@@ -496,9 +511,47 @@ agent benchmark reset-fixtures --repo .
 每个任务每次运行前都会先复制到独立 workspace，再在 workspace 里跑 agent 和 grader。artifact 里的 `run_manifest.json` 会记录 `repo_source`、`workspace_repo`、模型配置、代码版本、任务文件 hash 和运行环境。仓库里推荐把 benchmark 任务指向 `benchmark_fixtures/`，把试玩或教学场景留给 `demo/`。
 默认的 `--skip-preverified` 会在进入 LLM 前先跑目标验证；如果任务已经是通过状态，就直接记成一次成功的 benchmark 工件，`steps=0`、`tokens=0`。
 如果你想排除这些预检直接通过的样本，在 `summarize` 或 `compare` 时加 `--only-agent-runs`。如果 benchmark 把 fixture 改脏了，可以用 `benchmark reset-fixtures` 恢复到未修复初始态。
-新的 benchmark 汇总还会显示 `graph_queries`、`patch_conflicts`、`patch_reverts`、`failure_type_distribution` 和 `failure_stage_distribution`。每条 run 也会输出 `failure_type`、`failure_stage`、`failure_message`，方便区分是 agent、grading、workspace 还是模型层出了问题。
+新的 benchmark 汇总还会显示 `graph_queries`、`patch_conflicts`、`patch_reverts`、`finish_verification_failures`、`self_review_failures`、`taxonomy_recovery_prompts`、`auto_symbol_probes`、`first_pass_success_rate`、`failure_type_distribution` 和 `failure_stage_distribution`。每条 run 也会输出 `failure_type`、`failure_stage`、`failure_message`，方便区分是 agent、grading、workspace 还是模型层出了问题。
 Markdown report 现在使用固定模板，包含总成功率、任务数、平均 steps、平均 tokens、平均耗时、失败类型分布、每个任务结果、patch 文件和 baseline 对比。
 如果你想重放某次结构化 patch，可以直接用 `benchmark patch-replay`；加 `--reverse` 会重放对应的 `reverse_patch`。
+
+`benchmark run` 还会追加 `logs/memory/run_memory.jsonl`。这不是长期数据库，只是一份轻量 JSONL：记录 task、repo、test command、success、steps、failure taxonomy 和结果摘要，方便后续做经验检索或分析哪些任务类型最容易失败。
+
+### 长记忆与上下文压缩
+
+默认情况下，agent 会启用两层记忆：
+
+- `ConversationHistory`：当前 run / chat 的短期上下文，保留最近消息。
+- `Context compression`：短期上下文超过窗口时，旧消息不会直接丢弃，而是压缩成 `[COMPRESSED CONTEXT]` 摘要。
+- `Long memory`：跨 run 的本地 JSONL 记忆，路径是 `logs/memory/run_memory.jsonl`。
+
+可以在 `config/default.yaml` 里配置：
+
+```yaml
+context:
+  history_window: 20
+  enable_compression: true
+  enable_long_memory: true
+  long_memory_limit: 5
+```
+
+新任务开始时，agent 会根据 repo 和任务描述从 long memory 里检索相关记录，并注入类似：
+
+```text
+[LONG MEMORY] Relevant prior run memories:
+- status=success steps=3 test_cmd=pytest tests/test_parser.py -q :: Fixed parser empty string handling
+```
+
+当旧上下文被压缩时，后续 prompt 会包含：
+
+```text
+[COMPRESSED CONTEXT] Summary of 8 older messages.
+Recent older actions: file_read (...); apply_patch (...)
+Known failures: Traceback: ...
+Files mentioned: parser.py, tests/test_parser.py
+```
+
+这两个能力都是本地、确定性、无外部依赖的 MVP。后续如果要接 embedding/vector store，可以直接替换 long memory 的检索实现，不需要改 agent loop。
 
 ---
 

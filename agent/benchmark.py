@@ -21,6 +21,7 @@ from agent.artifacts import export_run_artifacts
 from agent.event_log import EventLog
 from agent.failure import FailureInfo
 from agent.grader import CommandGrader, CompositeGrader, Grader
+from agent.memory import append_run_memory
 from agent.task import Observation, ObservationStatus, RunResult, RunStatus, Task
 from tools.runtime import LocalRuntime, Runtime
 
@@ -175,6 +176,7 @@ def try_preverify_task(
         )
         log.log_task_complete(steps=0, summary=summary)
         artifact_dir = export_run_artifacts(log, result, elapsed, manifest=manifest)
+    append_run_memory(log_dir, task, result)
 
     _mark_preverified_artifact(
         artifact_dir,
@@ -241,6 +243,7 @@ def export_failed_benchmark_artifact(
         log.log_task_start(task)
         log.log_task_failed(steps=0, **failure.to_dict())
         artifact_dir = export_run_artifacts(log, result, 0.0, manifest=manifest)
+    append_run_memory(log_dir, task, result)
     return result, artifact_dir
 
 
@@ -348,6 +351,14 @@ def summarize_artifacts(root: str | Path, *, include_preverified: bool = True) -
         "patch_conflicts": 0,
         "patch_reverts": 0,
         "avg_graph_queries": 0.0,
+        "first_pass_success_count": 0,
+        "first_pass_success_rate": 0.0,
+        "finish_verification_failures": 0,
+        "self_review_failures": 0,
+        "taxonomy_recovery_prompts": 0,
+        "auto_symbol_probes": 0,
+        "long_memory_hits": 0,
+        "context_compressions": 0,
         "failure_type_distribution": {},
         "failure_stage_distribution": {},
         "runs": [],
@@ -361,6 +372,16 @@ def summarize_artifacts(root: str | Path, *, include_preverified: bool = True) -
     patch_conflicts = sum(int(item.get("patch_conflicts", 0)) for item in runs)
     patch_reverts = sum(int(item.get("patch_reverts", 0)) for item in runs)
     preverified_count = sum(1 for item in runs if item.get("preflight_verified"))
+    first_pass_success_count = sum(
+        1 for item in runs
+        if item.get("task_success") and int(item.get("reflections", 0)) == 0
+    )
+    finish_verification_failures = sum(int(item.get("finish_verification_failures", 0)) for item in runs)
+    self_review_failures = sum(int(item.get("self_review_failures", 0)) for item in runs)
+    taxonomy_recovery_prompts = sum(int(item.get("taxonomy_recovery_prompts", 0)) for item in runs)
+    auto_symbol_probes = sum(int(item.get("auto_symbol_probes", 0)) for item in runs)
+    long_memory_hits = sum(int(item.get("long_memory_hits", 0)) for item in runs)
+    context_compressions = sum(int(item.get("context_compressions", 0)) for item in runs)
     failure_types: dict[str, int] = {}
     failure_stages: dict[str, int] = {}
     for result in results:
@@ -401,6 +422,14 @@ def summarize_artifacts(root: str | Path, *, include_preverified: bool = True) -
             ) if patch_attempts else 0.0,
             "patch_conflicts": patch_conflicts,
             "patch_reverts": patch_reverts,
+            "first_pass_success_count": first_pass_success_count,
+            "first_pass_success_rate": round(first_pass_success_count / len(runs), 4),
+            "finish_verification_failures": finish_verification_failures,
+            "self_review_failures": self_review_failures,
+            "taxonomy_recovery_prompts": taxonomy_recovery_prompts,
+            "auto_symbol_probes": auto_symbol_probes,
+            "long_memory_hits": long_memory_hits,
+            "context_compressions": context_compressions,
             "failure_type_distribution": failure_types,
             "failure_stage_distribution": failure_stages,
             "runs": [
@@ -417,6 +446,12 @@ def summarize_artifacts(root: str | Path, *, include_preverified: bool = True) -
                     "patch_reverts": int(metrics.get("patch_reverts", 0)),
                     "graph_queries": int(metrics.get("graph_queries", 0)),
                     "preflight_verified": bool(metrics.get("preflight_verified")),
+                    "finish_verification_failures": int(metrics.get("finish_verification_failures", 0)),
+                    "self_review_failures": int(metrics.get("self_review_failures", 0)),
+                    "taxonomy_recovery_prompts": int(metrics.get("taxonomy_recovery_prompts", 0)),
+                    "auto_symbol_probes": int(metrics.get("auto_symbol_probes", 0)),
+                    "long_memory_hits": int(metrics.get("long_memory_hits", 0)),
+                    "context_compressions": int(metrics.get("context_compressions", 0)),
                     "failure_type": result.get("failure_type"),
                     "failure_stage": result.get("failure_stage"),
                     "failure_message": result.get("failure_message"),
@@ -459,6 +494,14 @@ def compare_artifact_roots(
         "patch_success_rate",
         "patch_conflicts",
         "patch_reverts",
+        "first_pass_success_count",
+        "first_pass_success_rate",
+        "finish_verification_failures",
+        "self_review_failures",
+        "taxonomy_recovery_prompts",
+        "auto_symbol_probes",
+        "long_memory_hits",
+        "context_compressions",
     ]
 
     deltas = {}

@@ -126,6 +126,32 @@ This suggests you are stuck. Stop and reconsider:
 Do not repeat the same action again.\
 """
 
+REFLECTION_VERIFICATION_FAILED = """\
+[REFLECTION] The finish verification failed, so the task is not complete yet.
+Use the failure output above as the next debugging target. Re-read the failing test or traceback,
+inspect the relevant source, make a focused fix, and run the targeted verification again before finishing.\
+"""
+
+_RECOVERY_PROMPTS = {
+    "patch_conflict": (
+        "[RECOVERY] The patch conflicted with the current file contents. "
+        "Read the target file again, recompute the smallest patch against the current content, then retry."
+    ),
+    "timeout": (
+        "[RECOVERY] The command timed out. Narrow the command to the most relevant test or file, "
+        "or inspect the code path before trying a longer run."
+    ),
+    "tool_failure": (
+        "[RECOVERY] The last tool call failed. Check the tool name and parameters, then try a corrected, targeted action."
+    ),
+    "workspace_error": (
+        "[RECOVERY] The workspace operation failed. Verify paths and repository state before editing again."
+    ),
+    "verification_failed": (
+        "[RECOVERY] Verification failed. Use the failing assertion or traceback to locate the root cause before editing."
+    ),
+}
+
 
 def reflection_test_failed() -> str:
     return REFLECTION_TEST_FAILED
@@ -137,6 +163,16 @@ def reflection_no_edit(n: int) -> str:
 
 def reflection_loop_detected(n: int) -> str:
     return REFLECTION_LOOP_DETECTED.format(n=n)
+
+
+def reflection_verification_failed() -> str:
+    return REFLECTION_VERIFICATION_FAILED
+
+
+def recovery_prompt_for_failure(failure_type: str | None) -> str | None:
+    if not failure_type:
+        return None
+    return _RECOVERY_PROMPTS.get(failure_type)
 
 
 # ---------------------------------------------------------------------------

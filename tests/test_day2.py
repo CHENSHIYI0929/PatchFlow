@@ -21,7 +21,7 @@ from agent.core import Agent, AgentConfig
 from agent.event_log import EventLog
 from agent.task import Action, ActionType, RunStatus, Task, ToolCall
 from llm.base import MockBackend
-from tools.base import FailingTool, NoopTool, ToolRegistry
+from tools.base import FailingTool, NoopTool, ToolRegistry, ToolResult
 from tools.file_tool import ApplyPatchTool
 
 
@@ -442,6 +442,167 @@ class TestReflectionTestFailed:
         contents = " ".join(m.content for m in second_call_messages)
         assert "REFLECTION" in contents
         log.close()
+
+    def test_test_failure_triggers_auto_symbol_probe(self, tmp_path):
+        task = Task(
+            task_id="reflsymbol",
+            description="fix tests",
+            repo_path=str(tmp_path),
+            max_steps=5,
+        )
+        log = EventLog.create(task, log_dir=str(tmp_path / "logs"))
+        registry = ToolRegistry()
+        registry.register(FailingTool("test", "FAILED test_demo.py::test_build"))
+        symbol_tool = NoopTool("find_symbol", output="test_demo.py:1: def test_build")
+        registry.register(symbol_tool)
+        script = [
+            make_tool_call_action("test"),
+            make_finish_action(),
+        ]
+        backend = MockBackend(script)
+        agent = Agent(backend, registry)
+
+        agent.run(task, log)
+
+        assert symbol_tool.call_count == 1
+        events = log.replay()
+        assert any(
+            e.event_type.value == "observation"
+            and e.payload["observation"]["metadata"].get("auto_symbol_probe")
+            for e in events
+        )
+        log.close()
+
+
+class SequencedTool(NoopTool):
+    def __init__(self, tool_name, results):
+        super().__init__(tool_name)
+        self._results = list(results)
+
+    def execute(self, params):
+        self.call_count += 1
+        self.last_params = params
+        if self._results:
+            return self._results.pop(0)
+        return ToolResult(success=True, output="ok")
+
+
+class TestFinishVerification:
+    def test_finish_verification_failure_feeds_back_into_next_round(self, tmp_path):
+        task = Task(
+            task_id="verifyloop",
+            description="fix tests",
+            repo_path=str(tmp_path),
+            test_cmd="python -m pytest test_demo.py -q",
+            max_steps=5,
+        )
+        log = EventLog.create(task, log_dir=str(tmp_path / "logs"))
+        registry = ToolRegistry()
+        registry.register(NoopTool("file_write", output="file written"))
+        registry.register(SequencedTool("shell", [
+            ToolResult(success=False, output="FAILED test_demo.py::test_x", error="Exit code: 1", failure_type="verification_failed"),
+            ToolResult(success=True, output="1 passed"),
+        ]))
+        script = [
+            make_tool_call_action("file_write", {"path": "demo.py", "content": "x=1"}),
+            make_finish_action("done too early"),
+            make_tool_call_action("file_write", {"path": "demo.py", "content": "x=2"}),
+            make_finish_action("done after fix"),
+        ]
+        backend = MockBackend(script)
+        agent = Agent(backend, registry)
+
+        result = agent.run(task, log)
+
+        assert result.status == RunStatus.SUCCESS
+        assert result.summary == "done after fix"
+        events = log.replay()
+        assert any(
+            e.event_type.value == "reflection"
+            and e.payload["reason"] == "finish_verification_failed"
+            for e in events
+        )
+        assert backend.call_count >= 4
+
+    def test_self_review_blocks_unresolved_conflict_marker(self, tmp_path):
+        task = Task(
+            task_id="reviewfail",
+            description="fix conflict marker",
+            repo_path=str(tmp_path),
+            max_steps=5,
+        )
+        target = tmp_path / "demo.py"
+        target.write_text("base\n", encoding="utf-8")
+        log = EventLog.create(task, log_dir=str(tmp_path / "logs"))
+        registry = ToolRegistry()
+        registry.register(ApplyPatchTool())
+        script = [
+            make_tool_call_action(
+                "apply_patch",
+                {
+                    "patch_type": "replace_file",
+                    "path": str(target),
+                    "content": "<<<<<<< HEAD\nbad\n>>>>>>> branch\n",
+                },
+            ),
+            make_finish_action("done too early"),
+            make_tool_call_action(
+                "apply_patch",
+                {
+                    "patch_type": "replace_file",
+                    "path": str(target),
+                    "content": "fixed\n",
+                },
+            ),
+            make_finish_action("done after review"),
+        ]
+        backend = MockBackend(script)
+        agent = Agent(backend, registry)
+
+        result = agent.run(task, log)
+
+        assert result.status == RunStatus.SUCCESS
+        assert result.summary == "done after review"
+        events = log.replay()
+        assert any(
+            e.event_type.value == "reflection"
+            and e.payload["reason"] == "self_review_failed"
+            for e in events
+        )
+
+    def test_taxonomy_recovery_prompt_after_patch_conflict(self, tmp_path):
+        task = Task(
+            task_id="recoverpatch",
+            description="recover from conflict",
+            repo_path=str(tmp_path),
+            max_steps=4,
+        )
+        target = tmp_path / "demo.py"
+        target.write_text("current\n", encoding="utf-8")
+        log = EventLog.create(task, log_dir=str(tmp_path / "logs"))
+        registry = ToolRegistry()
+        registry.register(ApplyPatchTool())
+        script = [
+            make_tool_call_action(
+                "apply_patch",
+                {
+                    "patch_type": "replace_file",
+                    "path": str(target),
+                    "content": "new\n",
+                    "expected_content": "stale\n",
+                },
+            ),
+            make_give_up_action("cannot patch"),
+        ]
+        backend = MockBackend(script)
+        agent = Agent(backend, registry)
+
+        result = agent.run(task, log)
+
+        assert result.failure_type == "patch_conflict"
+        second_call_messages = backend.received_messages[1]
+        contents = " ".join(m.content for m in second_call_messages)
+        assert "Read the target file again" in contents
 
     def test_reflection_includes_graph_hint_for_targeted_test(self, tmp_path):
         task = Task(

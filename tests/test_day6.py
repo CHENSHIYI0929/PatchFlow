@@ -8,6 +8,7 @@ GitHub Issue 入口依赖网络，只测纯逻辑部分。
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -67,6 +68,18 @@ class TestParseConfig:
     def test_context_section(self):
         config = _parse({"context": {"history_window": 10}})
         assert config.context.history_window == 10
+
+    def test_context_memory_and_compression_options(self):
+        config = _parse({
+            "context": {
+                "enable_compression": False,
+                "enable_long_memory": False,
+                "long_memory_limit": 2,
+            }
+        })
+        assert config.context.enable_compression is False
+        assert config.context.enable_long_memory is False
+        assert config.context.long_memory_limit == 2
 
     def test_partial_section_uses_defaults(self):
         config = _parse({"llm": {"provider": "openai"}})
@@ -957,6 +970,56 @@ class TestBenchmarkTaskSpecs:
         assert result.success is False
         assert result.failure_type == "timeout"
         assert "timed out" in result.message.lower()
+
+    def test_preverified_benchmark_run_records_memory(self, tmp_path):
+        from agent.benchmark import BenchmarkTaskSpec, try_preverify_task
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        task_file = tmp_path / "task.txt"
+        task_file.write_text("Already fixed", encoding="utf-8")
+        log_dir = tmp_path / "logs"
+        spec = BenchmarkTaskSpec(
+            path=task_file,
+            description="Already fixed",
+            test_cmd="python -c \"print('ok')\"",
+        )
+
+        preverified = try_preverify_task(spec, repo, log_dir=str(log_dir))
+
+        assert preverified is not None
+        memory_path = log_dir / "memory" / "run_memory.jsonl"
+        rows = [json.loads(line) for line in memory_path.read_text(encoding="utf-8").splitlines()]
+        assert rows[-1]["status"] == "success"
+        assert rows[-1]["test_cmd"] == spec.test_cmd
+
+    def test_failed_benchmark_artifact_records_memory(self, tmp_path):
+        from agent.benchmark import BenchmarkTaskSpec, export_failed_benchmark_artifact
+        from agent.failure import FAILURE_STAGE_PREVERIFY, FAILURE_TYPE_WORKSPACE_ERROR, failure
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        task_file = tmp_path / "task.txt"
+        task_file.write_text("Fix setup", encoding="utf-8")
+        log_dir = tmp_path / "logs"
+        spec = BenchmarkTaskSpec(path=task_file, description="Fix setup")
+
+        export_failed_benchmark_artifact(
+            spec=spec,
+            repo_path=repo,
+            log_dir=str(log_dir),
+            manifest=None,
+            failure=failure(
+                "Workspace setup failed",
+                failure_type=FAILURE_TYPE_WORKSPACE_ERROR,
+                failure_stage=FAILURE_STAGE_PREVERIFY,
+            ),
+        )
+
+        memory_path = log_dir / "memory" / "run_memory.jsonl"
+        rows = [json.loads(line) for line in memory_path.read_text(encoding="utf-8").splitlines()]
+        assert rows[-1]["status"] == "failed"
+        assert rows[-1]["failure_type"] == "workspace_error"
 
 
 class TestCliLog:

@@ -7,14 +7,16 @@ Day 5 测试：RepoMap、TokenBudget、ConversationHistory，以及 core.py 集�
 from __future__ import annotations
 
 from pathlib import Path
+import json
 
 import pytest
 
+from agent.memory import append_run_memory, format_memory_hits, search_memories
 from context.history import ConversationHistory
 from context.repo_map import RepoMap, _extract_python_symbols, _extract_symbols_regex
 from context.token_budget import TokenBudget, estimate_tokens
 from llm.base import LLMMessage, MockBackend
-from agent.task import Action, ActionType, Task, ToolCall
+from agent.task import Action, ActionType, RunResult, RunStatus, Task, ToolCall
 from tools.base import NoopTool, ToolRegistry
 
 
@@ -335,6 +337,20 @@ class TestConversationHistory:
         assert "second" not in contents  # 被丢弃
         assert "fourth" in contents
 
+    def test_sliding_window_compresses_dropped_context(self):
+        h = ConversationHistory(max_messages=3)
+        h.add(LLMMessage(role="user", content="Task: fix parser.py"))
+        h.add(LLMMessage(role="assistant", content="Thought: inspect parser\nAction: file_read\nParams: {}"))
+        h.add(LLMMessage(role="user", content="Observation: parser.py has parse_date"))
+        h.add(LLMMessage(role="user", content="Traceback: parser.py failed with ValueError"))
+
+        assert h.compressed_message_count == 1
+        summary = h.compressed_summary
+        assert "COMPRESSED CONTEXT" in summary
+        assert "file_read" in summary
+        dicts = h.to_dicts()
+        assert dicts[1]["content"].startswith("[COMPRESSED CONTEXT]")
+
     def test_first_message_never_dropped(self):
         h = ConversationHistory(max_messages=2)
         h.add(LLMMessage(role="user", content="task_description"))
@@ -347,6 +363,62 @@ class TestConversationHistory:
         h.add(LLMMessage(role="user", content="hello"))
         dicts = h.to_dicts()
         assert dicts == [{"role": "user", "content": "hello"}]
+
+    def test_compression_can_be_disabled(self):
+        h = ConversationHistory(max_messages=2, enable_compression=False)
+        h.add(LLMMessage(role="user", content="task"))
+        h.add(LLMMessage(role="assistant", content="Thought: inspect\nAction: file_read"))
+        h.add(LLMMessage(role="user", content="Observation: old.py"))
+
+        assert h.compressed_message_count == 0
+        assert len(h.to_list()) == 2
+
+
+class TestLongMemory:
+    def test_search_memories_finds_related_task(self, tmp_path):
+        task = Task(
+            task_id="mem001",
+            description="Fix parser empty string handling",
+            repo_path=str(tmp_path),
+            test_cmd="pytest tests/test_parser.py -q",
+        )
+        result = RunResult(
+            task_id=task.task_id,
+            status=RunStatus.SUCCESS,
+            summary="Fixed parser empty string handling",
+            steps_taken=3,
+            total_tokens=100,
+        )
+        append_run_memory(tmp_path / "logs", task, result)
+
+        hits = search_memories(
+            tmp_path / "logs",
+            query="parser empty string bug",
+            repo_path=tmp_path,
+            limit=3,
+        )
+
+        assert hits
+        text = format_memory_hits(hits)
+        assert "LONG MEMORY" in text
+        assert "pytest tests/test_parser.py -q" in text
+
+    def test_memory_file_is_jsonl(self, tmp_path):
+        task = Task(task_id="mem002", description="Fix auth", repo_path=str(tmp_path))
+        result = RunResult(
+            task_id=task.task_id,
+            status=RunStatus.FAILED,
+            summary="failed",
+            steps_taken=1,
+            total_tokens=10,
+            failure_type="verification_failed",
+        )
+
+        path = append_run_memory(tmp_path / "logs", task, result)
+
+        row = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+        assert row["task_description"] == "Fix auth"
+        assert row["lessons"]
 
     def test_from_dicts(self):
         dicts = [{"role": "user", "content": "task"}, {"role": "assistant", "content": "ok"}]
@@ -472,3 +544,53 @@ class TestCoreWithContext:
             result = agent.run(task, log)
 
         assert result.is_success()
+
+    def test_long_memory_injected_into_first_prompt(self, tmp_path):
+        from agent.core import Agent, AgentConfig
+        from agent.event_log import EventLog
+
+        prior_task = Task(
+            task_id="prior001",
+            description="Fix parser empty input",
+            repo_path=str(tmp_path),
+            test_cmd="pytest tests/test_parser.py -q",
+        )
+        append_run_memory(
+            tmp_path / "logs",
+            prior_task,
+            RunResult(
+                task_id=prior_task.task_id,
+                status=RunStatus.SUCCESS,
+                summary="Fixed parser empty input",
+                steps_taken=2,
+                total_tokens=50,
+            ),
+        )
+        task = Task(
+            task_id="ctxmem1",
+            description="Fix parser empty input again",
+            repo_path=str(tmp_path),
+            max_steps=2,
+        )
+        registry = ToolRegistry().register(NoopTool("shell"))
+        backend = MockBackend([Action(ActionType.FINISH, "done", message="ok")])
+        config = AgentConfig(
+            budget_tokens=80_000,
+            log_dir=str(tmp_path / "logs"),
+            enable_long_memory=True,
+            long_memory_limit=3,
+        )
+        agent = Agent(backend, registry, config)
+
+        with EventLog.create(task, log_dir=str(tmp_path / "logs")) as log:
+            result = agent.run(task, log)
+            events = log.replay()
+
+        assert result.is_success()
+        first_messages = backend.received_messages[0]
+        assert any("LONG MEMORY" in msg.content for msg in first_messages)
+        assert any(
+            event.event_type.value == "reflection"
+            and event.payload.get("reason") == "long_memory"
+            for event in events
+        )

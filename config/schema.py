@@ -61,6 +61,9 @@ class ToolsConfig:
 class ContextConfig:
     repo_map_budget: int = 8_000
     history_window: int = 20
+    enable_compression: bool = True
+    enable_long_memory: bool = True
+    long_memory_limit: int = 5
 
 
 @dataclass
@@ -153,6 +156,9 @@ def _parse(data: dict[str, Any]) -> AppConfig:
     context = ContextConfig(
         repo_map_budget=int(context_raw.get("repo_map_budget", 8_000)),
         history_window=int(context_raw.get("history_window", 20)),
+        enable_compression=bool(context_raw.get("enable_compression", True)),
+        enable_long_memory=bool(context_raw.get("enable_long_memory", True)),
+        long_memory_limit=int(context_raw.get("long_memory_limit", 5)),
     )
 
     return AppConfig(llm=llm, agent=agent, tools=tools, context=context)

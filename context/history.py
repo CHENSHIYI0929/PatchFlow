@@ -17,6 +17,7 @@ context/history.py
 
 from __future__ import annotations
 
+from context.compression import CompressionSummary, ContextCompressor, compressed_summary_message
 from llm.base import LLMMessage
 
 
@@ -31,7 +32,13 @@ class ConversationHistory:
         msgs = history.to_list()   # 给 LLMBackend 用
     """
 
-    def __init__(self, max_messages: int = 40) -> None:
+    def __init__(
+        self,
+        max_messages: int = 40,
+        *,
+        enable_compression: bool = True,
+        compressor: ContextCompressor | None = None,
+    ) -> None:
         """
         Args:
             max_messages: 最多保留的消息条数（含首条任务描述）。
@@ -39,6 +46,9 @@ class ConversationHistory:
         """
         self._messages: list[LLMMessage] = []
         self._max = max_messages
+        self._enable_compression = enable_compression
+        self._compressor = compressor or ContextCompressor()
+        self._summary = CompressionSummary()
 
     def add(self, message: LLMMessage) -> None:
         """添加一条消息，超出窗口时丢弃最旧的非首条消息。"""
@@ -52,11 +62,16 @@ class ConversationHistory:
 
     def to_list(self) -> list[LLMMessage]:
         """返回完整历史列表（浅拷贝）。"""
-        return list(self._messages)
+        if not self._enable_compression:
+            return list(self._messages)
+        summary = compressed_summary_message(self._summary)
+        if summary is None or not self._messages:
+            return list(self._messages)
+        return [self._messages[0], summary, *self._messages[1:]]
 
     def to_dicts(self) -> list[dict]:
         """转为 dict 列表，供 TokenBudget.trim_history() 使用。"""
-        return [{"role": m.role, "content": m.content} for m in self._messages]
+        return [{"role": m.role, "content": m.content} for m in self.to_list()]
 
     @classmethod
     def from_dicts(cls, dicts: list[dict], max_messages: int = 40) -> "ConversationHistory":
@@ -76,14 +91,27 @@ class ConversationHistory:
     def clear_except_first(self) -> None:
         """保留首条任务描述，清除其余（紧急重置用）。"""
         if self._messages:
+            if self._enable_compression and len(self._messages) > 1:
+                self._summary = self._compressor.update(self._summary, self._messages[1:])
             self._messages = [self._messages[0]]
+
+    @property
+    def compressed_summary(self) -> str:
+        """Return the current compressed summary text, if any."""
+        return self._summary.to_text()
+
+    @property
+    def compressed_message_count(self) -> int:
+        return self._summary.message_count
 
     def _trim(self) -> None:
         """超出 max_messages 时，从索引 1 开始丢弃最旧的消息。"""
         while len(self._messages) > self._max:
             # 保留 index 0（任务描述），从 index 1 开始丢
             if len(self._messages) > 1:
-                self._messages.pop(1)
+                dropped = self._messages.pop(1)
+                if self._enable_compression:
+                    self._summary = self._compressor.update(self._summary, [dropped])
             else:
                 break
 

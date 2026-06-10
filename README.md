@@ -2,7 +2,7 @@
 
 自主编程智能体。给它一个任务描述，它会自己探索代码库、检索上下文、优先用结构化 patch 修改文件、运行测试，直到完成。
 
-它不是单纯的“会改文件”工具，而是一个可评测 coding agent 平台，已经把任务 manifest、benchmark 分层、图结构代码理解、patch 回滚 / 冲突 / 重放，以及运行工件和统计分析都接了起来。
+它不是单纯的“会改文件”工具，而是一个可评测 coding agent 平台，已经把任务 manifest、benchmark 分层、图结构代码理解、长记忆、上下文压缩、patch 回滚 / 冲突 / 重放、结束前验证、自审、失败恢复，以及运行工件和统计分析都接了起来。
 
 支持 **Claude、DeepSeek、OpenAI、Groq、Ollama** 多种模型，内置流式输出、Docker 沙箱、GitHub Issue 自动修复。
 
@@ -102,6 +102,14 @@ benchmark 汇总里还会额外统计 `graph_queries`、`patch_conflicts`、`pat
 Markdown benchmark report 现在会输出固定模板：总成功率、任务数、平均 steps、平均 tokens、平均耗时、失败类型分布、每任务结果、patch 文件名，以及和 baseline 的对比。
 如果你想把某次结构化 patch 或它的 reverse patch 重放到仓库里，可以使用 `benchmark patch-replay`。
 
+agent 自身也会把 coding 能力相关的信号写入 artifacts 和 benchmark summary：
+- `finish_verification_attempts` / `finish_verification_failures`：模型喊 FINISH 后是否又被目标测试拉回修改循环
+- `self_review_attempts` / `self_review_failures`：结束前 patch 自审是否拦截了冲突标记、debug hook 等明显风险
+- `taxonomy_recovery_prompts`：工具失败、patch 冲突、workspace 问题等是否触发了按 failure taxonomy 定制的恢复提示
+- `auto_symbol_probes`：测试失败后是否自动用 `find_symbol` 追踪错误里出现的函数、类或测试名
+- `first_pass_success_rate`：benchmark 中“第一次结束验证就通过”的比例，用来观察 agent 是否越来越少靠多轮修补过关
+- `long_memory_hits` / `context_compressions`：长期记忆是否命中、旧上下文是否被压缩保留下来
+
 ### GitHub Issue 自动修复
 
 ```bash
@@ -132,6 +140,9 @@ agent:
 context:
   repo_map_budget: 8000   # repo-map 注入量
   history_window: 20      # 保留历史轮数
+  enable_compression: true
+  enable_long_memory: true
+  long_memory_limit: 5
 ```
 
 ---
@@ -144,8 +155,13 @@ PatchFlow/
 │   ├── core.py         # Agent 类，驱动整个运行循环
 │   ├── task.py         # Task / Action / Observation / RunResult 数据类
 │   ├── patch.py        # 结构化 Patch 对象（replace_file / search_replace / replace_range）
+│   ├── failure.py      # failure_type / failure_stage 分类和推断
+│   ├── grader.py       # CommandGrader / CompositeGrader 统一验证入口
+│   ├── review.py       # FINISH 前 patch 自审
+│   ├── memory.py       # benchmark 运行经验 JSONL 记录
 │   ├── event_log.py    # JSONL append-only 事件流，支持回放
 │   ├── artifacts.py    # 运行工件导出（events / metrics / retrievals / patches）
+│   ├── benchmark.py    # benchmark run / summarize / compare / report 支撑
 │   └── prompt.py       # System prompt 模板
 │
 ├── llm/                # LLM 后端
@@ -164,6 +180,7 @@ PatchFlow/
 │   └── runtime.py      # LocalRuntime / DockerRuntime
 │
 ├── context/            # 上下文管理
+│   ├── compression.py  # 旧对话上下文的确定性压缩摘要
 │   ├── repo_map.py     # tree-sitter 多语言符号提取，生成 repo 摘要
 │   ├── token_budget.py # Token 预算分配与裁剪
 │   └── history.py      # 对话历史滑动窗口
@@ -199,7 +216,13 @@ PatchFlow/
 **多语言 Repo-map + 可追踪文件块**
 用 tree-sitter 精确提取符号（函数、类、方法），生成 repo 摘要注入 system prompt，
 同时记录被纳入上下文的结构化 trace chunks，便于离线分析和 benchmark。
-测试失败后会自动结合图关系排序候选文件，优先 `file_read` 显式 `target_files`，再用 `graph_neighbors` 探测相关模块，把结果写回上下文。
+测试失败后会自动结合图关系排序候选文件，优先 `file_read` 显式 `target_files`，再用 `graph_neighbors` 探测相关模块；如果失败输出里出现函数、类或测试名，还会自动调用 `find_symbol` 做符号级追踪，把结果写回上下文。
+
+**长记忆 + 上下文压缩**
+- 每次运行会把任务、结果、failure taxonomy、测试命令和经验写入 `logs/memory/run_memory.jsonl`
+- 新任务开始时会按 repo 和任务关键词检索相关经验，并以 `[LONG MEMORY]` 片段注入上下文
+- 对话历史超过窗口后，旧消息会先压缩成 `[COMPRESSED CONTEXT]` 摘要，再继续参与后续 prompt
+- benchmark metrics 会记录 `long_memory_hits` 和 `context_compressions`
 
 **流式输出**
 模型 thought 逐 token 实时打印，工具调用实时显示，体验接近 Claude Code。
@@ -215,6 +238,8 @@ repo 通过 bind mount 双向同步，默认断网。
 
 **Reflection 机制**
 - 测试失败 → 自动触发反思 prompt，重新分析错误原因
+- FINISH 前如果目标 `test_cmd` 失败，会把验证结果喂回模型继续修
+- 工具失败、patch 冲突、timeout、workspace 错误会按 failure taxonomy 注入定制恢复提示
 - 连续 6 步无文件修改 → 触发反思，防止探索死循环
 - 连续 3 步相同操作 → 判定死循环，自动终止
 
@@ -222,6 +247,7 @@ repo 通过 bind mount 双向同步，默认断网。
 - 优先使用 `apply_patch` 做结构化编辑，而不是直接整文件 `file_write`
 - 当前支持 `replace_file`、`search_replace`、`replace_range`
 - 每次 patch 都会记录 `patch_id`、参数和执行结果，便于回滚和 benchmark 统计
+- FINISH 前会自审最终 patch，拦截冲突标记、`breakpoint()`、`pdb.set_trace()` 等明显不应提交的内容
 - 支持冲突前置校验（期望内容 / 行范围 / 替换命中次数）
 - 成功应用后会返回 `reverse_patch`，可直接交给 `revert_patch` 做回滚
 
@@ -230,6 +256,8 @@ repo 通过 bind mount 双向同步，默认断网。
 - step 级别记录 `step_id`、`action_id`、`tool_call_id`
 - 自动导出 `events.json`、`metrics.json`、`retrievals.json`、`patches.json`
 - `patches.json` 记录 `reverse_patch`、冲突和回滚信息，便于 `benchmark patch-replay`
+- `metrics.json` 和 benchmark summary 会记录结束前验证、自审失败、taxonomy recovery、自动符号探测等能力指标
+- run / benchmark 会追加 `logs/memory/run_memory.jsonl`，沉淀任务、失败类型和运行摘要，方便后续做经验检索
 - 支持完整回放和基础 benchmark 指标分析
 
 ---

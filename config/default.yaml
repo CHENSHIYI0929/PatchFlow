@@ -20,3 +20,6 @@ tools:
 context:
   repo_map_budget: 8000 # repo-map 最大 token 数
   history_window: 20 # 保留最近 N 轮对话
+  enable_compression: true # 超出窗口时压缩旧上下文而不是直接丢弃
+  enable_long_memory: true # 从 logs/memory/run_memory.jsonl 检索相关经验
+  long_memory_limit: 5 # 每次最多注入几条长期记忆

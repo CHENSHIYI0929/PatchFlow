@@ -36,6 +36,7 @@ def export_run_artifacts(
     retrievals = _collect_retrievals(events)
     patches = _collect_patches(events, result.patch)
     grading = _collect_grading(events)
+    capability_stats = _collect_capability_stats(events)
     materialized_manifest = _finalize_manifest(manifest, events)
 
     metrics = {
@@ -56,6 +57,7 @@ def export_run_artifacts(
         "failure_stage": result.failure_stage,
         "grader": grading.get("grader"),
         "grader_checks": grading.get("checks", []),
+        **capability_stats,
     }
     if metrics["patch_attempts"]:
         metrics["patch_success_rate"] = round(
@@ -190,6 +192,35 @@ def _collect_grading(events: list[dict[str, Any]]) -> dict[str, Any]:
             "checks": metadata.get("checks", []),
         }
     return {"grader": None, "checks": []}
+
+
+def _collect_capability_stats(events: list[dict[str, Any]]) -> dict[str, int]:
+    observations = [
+        event["payload"]["observation"]
+        for event in events
+        if event["event_type"] == EventType.OBSERVATION.value
+    ]
+    reflections = [
+        event["payload"]
+        for event in events
+        if event["event_type"] == EventType.REFLECTION.value
+    ]
+    finish_verifier = [obs for obs in observations if obs.get("tool_name") == "finish_verifier"]
+    self_reviews = [obs for obs in observations if obs.get("tool_name") == "self_review"]
+    symbol_probes = [
+        obs for obs in observations
+        if (obs.get("metadata") or {}).get("auto_symbol_probe")
+    ]
+    return {
+        "finish_verification_attempts": len(finish_verifier),
+        "finish_verification_failures": sum(1 for obs in finish_verifier if obs.get("status") != "success"),
+        "self_review_attempts": len(self_reviews),
+        "self_review_failures": sum(1 for obs in self_reviews if obs.get("status") != "success"),
+        "taxonomy_recovery_prompts": sum(1 for item in reflections if item.get("reason") == "taxonomy_recovery"),
+        "auto_symbol_probes": len(symbol_probes),
+        "long_memory_hits": sum(1 for item in reflections if item.get("reason") == "long_memory"),
+        "context_compressions": sum(1 for item in reflections if item.get("reason") == "context_compression"),
+    }
 
 
 def _finalize_manifest(

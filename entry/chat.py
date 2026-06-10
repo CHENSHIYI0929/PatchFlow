@@ -216,6 +216,10 @@ class ChatSession:
             history_max_messages=config.context.history_window * 2,
             llm_max_retries=3,
             llm_retry_delay=1.0,
+            enable_context_compression=config.context.enable_compression,
+            enable_long_memory=config.context.enable_long_memory,
+            long_memory_limit=config.context.long_memory_limit,
+            log_dir=config.agent.log_dir,
             stream=True,
             stream_callback=_stream_cb,
             thought_callback=_thought_cb,
@@ -224,7 +228,8 @@ class ChatSession:
         )
         self.agent = Agent(backend, registry, agent_cfg)
         self._shared_history = ConversationHistory(
-            max_messages=config.context.history_window * 2
+            max_messages=config.context.history_window * 2,
+            enable_compression=config.context.enable_compression,
         )
 
         # 累计统计

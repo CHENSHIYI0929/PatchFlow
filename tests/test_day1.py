@@ -618,3 +618,56 @@ class TestArtifactExport:
         metrics = json.loads((artifact_dir / "metrics.json").read_text())
         assert metrics["grader"] == {"name": "test", "type": "command"}
         assert metrics["grader_checks"] == [{"name": "test", "success": True}]
+
+    def test_export_run_artifacts_tracks_agent_capability_stats(self, sample_task, tmp_log_dir):
+        with EventLog.create(sample_task, log_dir=str(tmp_log_dir)) as log:
+            log.log_task_start(sample_task)
+            log.log_observation(
+                step=1,
+                observation=Observation(
+                    status=ObservationStatus.ERROR,
+                    output="FAILED test_demo.py::test_build",
+                    tool_name="finish_verifier",
+                    error="Exit code: 1",
+                ),
+            )
+            log.log_observation(
+                step=1,
+                observation=Observation(
+                    status=ObservationStatus.ERROR,
+                    output="Self-review found blocking issues",
+                    tool_name="self_review",
+                    error="Self-review found blocking issues",
+                ),
+            )
+            log.log_observation(
+                step=1,
+                observation=Observation(
+                    status=ObservationStatus.SUCCESS,
+                    output="demo.py:1: def test_build",
+                    tool_name="find_symbol",
+                    metadata={"auto_symbol_probe": True},
+                ),
+            )
+            log.log_reflection(step=1, reason="taxonomy_recovery", prompt="recover")
+            log.log_reflection(step=1, reason="long_memory", prompt="memory")
+            log.log_reflection(step=1, reason="context_compression", prompt="summary")
+            log.log_task_failed(steps=1, reason="failed")
+
+        result = RunResult(
+            task_id=sample_task.task_id,
+            status=RunStatus.FAILED,
+            summary="failed",
+            steps_taken=1,
+            total_tokens=5,
+        )
+        artifact_dir = export_run_artifacts(log, result, elapsed_seconds=0.5)
+
+        metrics = json.loads((artifact_dir / "metrics.json").read_text())
+        assert metrics["finish_verification_attempts"] == 1
+        assert metrics["finish_verification_failures"] == 1
+        assert metrics["self_review_failures"] == 1
+        assert metrics["taxonomy_recovery_prompts"] == 1
+        assert metrics["auto_symbol_probes"] == 1
+        assert metrics["long_memory_hits"] == 1
+        assert metrics["context_compressions"] == 1
