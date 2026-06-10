@@ -1,0 +1,14 @@
+---
+repo: benchmark_fixtures/flash_demo
+test_path: test_buggy_math.py
+finish_if_verified: true
+skip_preverified: true
+max_steps: 12
+---
+修复 `benchmark_fixtures/flash_demo/buggy_math.py` 中 `safe_divide` 的 bug。
+
+要求：
+1. 当除数为 0 时返回 `None`，不要抛异常。
+2. 正常除法行为保持不变。
+3. 尽量少改，优先使用 `apply_patch`。
+4. 修复后确保 `benchmark_fixtures/flash_demo/test_buggy_math.py` 通过。

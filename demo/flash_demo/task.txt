@@ -1,0 +1,9 @@
+修复 demo/flash_demo/buggy_math.py 中 safe_divide 的 bug。
+
+目标：
+1. 当除数为 0 时，safe_divide 返回 None，不要抛异常。
+2. 正常情况下保持 a / b 的行为不变。
+3. 不要改动其他函数。
+4. 优先使用 apply_patch，改动尽量小。
+5. 修复后确保 demo/flash_demo/test_buggy_math.py 通过。
+

@@ -1,0 +1,14 @@
+---
+repo: benchmark_fixtures/flash_plus_demo
+test_path: test_checkout.py
+finish_if_verified: true
+skip_preverified: true
+max_steps: 12
+---
+修复 `benchmark_fixtures/flash_plus_demo` 的结算逻辑。
+
+要求：
+1. 优惠券要忽略空格并大小写不敏感。
+2. 结算要先打折，再算税。
+3. 尽量少改，优先使用 `apply_patch`。
+4. 修复后让 `benchmark_fixtures/flash_plus_demo/test_checkout.py` 通过。

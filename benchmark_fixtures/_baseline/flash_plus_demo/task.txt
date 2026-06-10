@@ -1,0 +1,7 @@
+修复 benchmark_fixtures/flash_plus_demo 的结算逻辑。
+
+目标：
+1. 优惠券要忽略空格并大小写不敏感。
+2. 结算要先打折，再算税。
+3. 尽量少改，优先用 apply_patch。
+4. 修复后让 test_checkout.py 通过。

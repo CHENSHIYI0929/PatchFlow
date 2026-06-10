@@ -1,0 +1,14 @@
+---
+repo: benchmark_fixtures/run_demo
+test_path: test_report.py
+finish_if_verified: true
+skip_preverified: true
+max_steps: 12
+---
+修复 `benchmark_fixtures/run_demo` 中的成绩报告生成逻辑。
+
+要求：
+1. 解析成绩行时忽略首尾空格，并把科目名统一成小写。
+2. 平均分计算和报告输出保持一致。
+3. 尽量少改，优先使用 `apply_patch`。
+4. 修复后确保 `benchmark_fixtures/run_demo/test_report.py` 通过。

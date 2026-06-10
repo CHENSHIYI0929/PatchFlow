@@ -1,0 +1,22 @@
+llm:
+  provider: openai
+  model: deepseek-ai/DeepSeek-V4-Flash
+  api_key: ${SILICONFLOW_API_KEY}
+  base_url: https://api.siliconflow.cn/v1
+  max_tokens: 8192
+
+agent:
+  max_steps: 40
+  budget_tokens: 80000
+  log_dir: ./logs
+
+tools:
+  shell:
+    timeout: 30 # 秒
+    max_output_tokens: 8000 # 截断长度
+  file:
+    max_view_lines: 100 # view 命令每次显示行数
+
+context:
+  repo_map_budget: 8000 # repo-map 最大 token 数
+  history_window: 20 # 保留最近 N 轮对话
