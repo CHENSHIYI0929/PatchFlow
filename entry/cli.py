@@ -69,11 +69,22 @@ def magenta(t: str) -> str: return _c(t, "35")
 class TaskTimeoutError(TimeoutError):
     """Raised when a benchmark task exceeds its wall-clock timeout."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        partial_progress: dict | None = None,
+        elapsed_seconds: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.partial_progress = partial_progress or {}
+        self.elapsed_seconds = elapsed_seconds
 
-def _benchmark_run_worker(result_queue, payload: dict) -> None:
+
+def _benchmark_run_worker(result_queue, progress_queue, payload: dict) -> None:
     """Run a single benchmark task in a child process."""
     try:
-        result, artifact_dir = _execute_run(**payload)
+        result, artifact_dir = _execute_run(**payload, progress_queue=progress_queue)
         result_queue.put({
             "ok": True,
             "result": result,
@@ -97,17 +108,39 @@ def _execute_run_with_task_timeout(seconds: int | None, payload: dict):
     except ValueError:  # pragma: no cover - platform fallback
         ctx = multiprocessing.get_context()
     result_queue = ctx.Queue(maxsize=1)
-    process = ctx.Process(target=_benchmark_run_worker, args=(result_queue, payload))
+    progress_queue = ctx.Queue()
+    process = ctx.Process(target=_benchmark_run_worker, args=(result_queue, progress_queue, payload))
     process.start()
-    process.join(seconds)
+    start = time.time()
+    latest_progress: dict | None = None
 
-    if process.is_alive():
-        process.terminate()
-        process.join(5)
-        if process.is_alive() and hasattr(process, "kill"):
-            process.kill()
-            process.join(1)
-        raise TaskTimeoutError(f"Timed out after {seconds}s")
+    while True:
+        try:
+            while True:
+                latest_progress = progress_queue.get_nowait()
+        except queue.Empty:
+            pass
+
+        process.join(0.2)
+        if not process.is_alive():
+            break
+        if time.time() - start >= seconds:
+            process.terminate()
+            process.join(5)
+            if process.is_alive() and hasattr(process, "kill"):
+                process.kill()
+                process.join(1)
+            raise TaskTimeoutError(
+                f"Timed out after {seconds}s",
+                partial_progress=latest_progress,
+                elapsed_seconds=time.time() - start,
+            )
+
+    try:
+        while True:
+            latest_progress = progress_queue.get_nowait()
+    except queue.Empty:
+        pass
 
     try:
         message = result_queue.get_nowait()
@@ -116,6 +149,8 @@ def _execute_run_with_task_timeout(seconds: int | None, payload: dict):
     finally:
         result_queue.close()
         result_queue.join_thread()
+        progress_queue.close()
+        progress_queue.join_thread()
 
     if message.get("ok"):
         return message["result"], message["artifact_dir"]
@@ -240,6 +275,9 @@ def _execute_run(
     disable_self_review: bool = False,
     disable_long_memory: bool = False,
     disable_compression: bool = False,
+    task_category: str | None = None,
+    expected_failure_type: str | None = None,
+    progress_queue=None,
 ):
     """Shared run execution for `run` and benchmark batch mode."""
     if show_banner:
@@ -285,6 +323,18 @@ def _execute_run(
         sys.stdout.write(dim(text))
         sys.stdout.flush()
 
+    def _progress_cb(payload: dict) -> None:
+        if progress_queue is None:
+            return
+        progress = dict(payload)
+        progress["repo_path"] = str(repo_path)
+        progress["source_repo_path"] = source_repo_path or str(repo_path)
+        progress["task_file"] = task_file
+        try:
+            progress_queue.put_nowait(progress)
+        except Exception:
+            pass
+
     agent_config = AgentConfig(
         max_steps=config.agent.max_steps,
         budget_tokens=config.agent.budget_tokens,
@@ -304,6 +354,7 @@ def _execute_run(
         thought_callback=_thought_cb if stream else None,
         confirm_dangerous=confirm,
         confirm_callback=confirm_cb,
+        progress_callback=_progress_cb if progress_queue is not None else None,
     )
     agent = Agent(backend, registry, agent_config)
     mechanisms = {
@@ -322,7 +373,10 @@ def _execute_run(
         description=description,
         repo_path=str(repo_path),
         source_repo_path=source_repo_path or str(repo_path),
+        task_id=(manifest or {}).get("task_id"),
         task_file=task_file,
+        task_category=task_category,
+        expected_failure_type=expected_failure_type,
         test_cmd=test_cmd,
         exclude_paths=exclude_paths or [],
         target_files=target_files or [],
@@ -340,6 +394,13 @@ def _execute_run(
     try:
         with EventLog.create(task_obj, log_dir=config.agent.log_dir) as log:
             click.echo(dim(f"  Log: {log.path}\n"))
+            _progress_cb({
+                "task_id": task_obj.task_id,
+                "steps_taken": 0,
+                "total_tokens": 0,
+                "state": "log_opened",
+                "log_path": str(log.path),
+            })
             result = agent.run(task_obj, log)
             if grader is not None and result.is_success():
                 grader_result = grader.run(repo_path, runtime=runtime, timeout=120)
@@ -1072,6 +1133,7 @@ def benchmark_run(
                 log_dir=run_config.agent.log_dir,
                 manifest=manifest,
                 failure=failure_info,
+                elapsed_seconds=0.0,
             )
             click.echo(bold(f"[{index}/{len(task_files)}] {task_file.name}"))
             click.echo(red(f"  Workspace  : {exc}"))
@@ -1133,6 +1195,7 @@ def benchmark_run(
                 log_dir=run_config.agent.log_dir,
                 manifest=manifest,
                 failure=failure_info,
+                elapsed_seconds=0.0,
             )
             click.echo(red(f"  Preverify  : {exc}"))
             click.echo(f"  Artifacts  : {artifact_dir}\n")
@@ -1176,6 +1239,8 @@ def benchmark_run(
                     "disable_self_review": disable_self_review,
                     "disable_long_memory": disable_long_memory,
                     "disable_compression": disable_compression,
+                    "task_category": spec.category,
+                    "expected_failure_type": spec.expected_failure_type,
                 },
             )
         except TaskTimeoutError as exc:
@@ -1190,6 +1255,8 @@ def benchmark_run(
                 log_dir=run_config.agent.log_dir,
                 manifest=manifest,
                 failure=failure_info,
+                partial_progress=exc.partial_progress,
+                elapsed_seconds=exc.elapsed_seconds or float(task_timeout_seconds or 0),
             )
             click.echo(red(f"  Timeout    : {exc}"))
             click.echo(f"  Artifacts  : {artifact_dir}\n")
@@ -1205,6 +1272,7 @@ def benchmark_run(
                 log_dir=run_config.agent.log_dir,
                 manifest=manifest,
                 failure=failure_info,
+                elapsed_seconds=0.0,
             )
             click.echo(red(f"  Run error  : {exc}"))
             click.echo(f"  Artifacts  : {artifact_dir}\n")

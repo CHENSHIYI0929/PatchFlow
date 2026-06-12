@@ -76,6 +76,8 @@ class Task:
     issue_url: str | None = None        # GitHub issue URL，自动修复模式时填入
     task_file: str | None = None        # 任务文件路径（benchmark 等场景）
     source_repo_path: str | None = None # 原始任务 repo（workspace copy 前）
+    task_category: str | None = None    # benchmark / memory 用任务类别
+    expected_failure_type: str | None = None  # 预期失败类型，用于经验检索
     test_cmd: str | None = None         # 运行测试的命令，如 "pytest tests/"
     exclude_paths: list[str] = field(default_factory=list)  # repo-map / graph analysis 时跳过的相对路径
     target_files: list[str] = field(default_factory=list)   # 任务已知的高价值目标文件

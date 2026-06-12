@@ -36,6 +36,7 @@ def export_run_artifacts(
     retrievals = _collect_retrievals(events)
     patches = _collect_patches(events, result.patch)
     grading = _collect_grading(events)
+    memory_hits = _collect_memory_hits(events)
     capability_stats = _collect_capability_stats(events)
     materialized_manifest = _finalize_manifest(manifest, events)
 
@@ -48,6 +49,8 @@ def export_run_artifacts(
         "tool_call_count": sum(stats["tool_calls"].values()),
         "retrieval_queries": len(retrievals),
         "retrieval_match_count": sum(item.get("match_count", 0) for item in retrievals),
+        "memory_hit_count": len(memory_hits),
+        "experience_memory_hits": sum(1 for item in memory_hits if item.get("memory_kind") == "experience"),
         "patch_attempts": len(patches),
         "patch_successes": sum(1 for item in patches if item.get("success")),
         "patch_conflicts": sum(1 for item in patches if item.get("conflict")),
@@ -74,9 +77,10 @@ def export_run_artifacts(
     _write_json(artifact_dir / "metrics.json", metrics)
     _write_json(artifact_dir / "result.json", result.to_dict())
     _write_json(artifact_dir / "retrievals.json", retrievals)
+    _write_json(artifact_dir / "memory_hits.json", memory_hits)
     _write_json(artifact_dir / "patches.json", patches)
     (artifact_dir / "final_report.md").write_text(
-        _render_final_report(result, metrics, retrievals, patches, events),
+        _render_final_report(result, metrics, retrievals, memory_hits, patches, events),
         encoding="utf-8",
     )
     if materialized_manifest is not None:
@@ -204,6 +208,17 @@ def _collect_grading(events: list[dict[str, Any]]) -> dict[str, Any]:
     return {"grader": None, "checks": []}
 
 
+def _collect_memory_hits(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    for event in events:
+        if event["event_type"] != EventType.REFLECTION.value:
+            continue
+        payload = event["payload"]
+        if payload.get("reason") != "long_memory":
+            continue
+        return _parse_long_memory_prompt(str(payload.get("prompt") or ""))
+    return []
+
+
 def _collect_capability_stats(events: list[dict[str, Any]]) -> dict[str, int]:
     actions = [
         event["payload"]["action"]
@@ -271,6 +286,7 @@ def _render_final_report(
     result: RunResult,
     metrics: dict[str, Any],
     retrievals: list[dict[str, Any]],
+    memory_hits: list[dict[str, Any]],
     patches: list[dict[str, Any]],
     events: list[dict[str, Any]],
 ) -> str:
@@ -300,6 +316,7 @@ def _render_final_report(
         if event["event_type"] == EventType.OBSERVATION.value
         and event["payload"]["observation"].get("tool_name") in {"self_review", "patch_review"}
     ]
+    trajectory = _summarize_failure_trajectory(events, patches)
     lines = [
         "# Final Report",
         "",
@@ -324,6 +341,13 @@ def _render_final_report(
             for match in item.get("matches", [])[:8]
         ],
         "",
+        "## Memory Hints",
+        "",
+        *[
+            f"- [{item.get('kind')}] {item.get('text')}"
+            for item in memory_hits[:8]
+        ],
+        "",
         "## Edit Plans",
         "",
         *[
@@ -339,6 +363,10 @@ def _render_final_report(
             for review in reviews
         ],
         "",
+        "## Failure Trajectory",
+        "",
+        *trajectory,
+        "",
         "## Test Results",
         "",
         *[f"- {str(test).splitlines()[0][:180]}" for test in tests if test],
@@ -353,9 +381,128 @@ def _render_final_report(
         f"- edit_plans: {metrics.get('edit_plans', 0)}",
         f"- patch_review_failures: {metrics.get('patch_review_failures', 0)}",
         f"- long_memory_hits: {metrics.get('long_memory_hits', 0)}",
+        f"- memory_hit_count: {metrics.get('memory_hit_count', 0)}",
+        f"- experience_memory_hits: {metrics.get('experience_memory_hits', 0)}",
         f"- context_compressions: {metrics.get('context_compressions', 0)}",
     ]
     return "\n".join(lines) + "\n"
+
+
+def _parse_long_memory_prompt(prompt: str) -> list[dict[str, Any]]:
+    hits: list[dict[str, Any]] = []
+    section = "memory"
+    for line in prompt.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("[LONG MEMORY]"):
+            continue
+        if stripped.startswith("Successful patterns for"):
+            section = "success_pattern"
+            hits.append({"kind": section, "text": stripped})
+            continue
+        if stripped.startswith("Recovery hints for"):
+            section = "recovery_hint"
+            hits.append({"kind": section, "text": stripped})
+            continue
+        if stripped.startswith("- "):
+            text = stripped[2:].strip()
+            item = {"kind": section, "text": text}
+            if "memory=experience" in text:
+                item["memory_kind"] = "experience"
+            elif "memory=" in text:
+                item["memory_kind"] = "run"
+            hits.append(item)
+    return hits
+
+
+def _summarize_failure_trajectory(
+    events: list[dict[str, Any]],
+    patches: list[dict[str, Any]],
+) -> list[str]:
+    lines: list[str] = []
+    if not events:
+        return ["- No events recorded."]
+
+    failure_event = next(
+        (event for event in reversed(events) if event["event_type"] == EventType.TASK_FAILED.value),
+        None,
+    )
+    if failure_event is None:
+        return ["- No failure recorded in event log."]
+
+    payload = failure_event["payload"]
+    lines.append(f"- Failure reason: {payload.get('reason') or 'unknown'}")
+    if payload.get("failure_type") or payload.get("failure_stage"):
+        lines.append(
+            f"- Failure taxonomy: {payload.get('failure_type') or 'unknown'} @ "
+            f"{payload.get('failure_stage') or 'unknown'}"
+        )
+
+    recent_actions = [
+        event["payload"]
+        for event in events
+        if event["event_type"] == EventType.ACTION.value
+    ][-5:]
+    if recent_actions:
+        lines.append("- Last actions:")
+        lines.extend(
+            [
+                "  - step {step}: {tool} | {thought}".format(
+                    step=item.get("step"),
+                    tool=((item.get("action") or {}).get("tool_call") or {}).get("name")
+                    or (item.get("action") or {}).get("action_type"),
+                    thought=((item.get("action") or {}).get("thought") or "").splitlines()[0][:120],
+                )
+                for item in recent_actions
+            ]
+        )
+
+    recent_tests = [
+        event["payload"]
+        for event in events
+        if event["event_type"] == EventType.OBSERVATION.value
+        and event["payload"]["observation"].get("tool_name") in {"test", "pytest", "finish_verifier", "preflight_verify", "verify_task"}
+    ][-3:]
+    if recent_tests:
+        lines.append("- Last verification outputs:")
+        for item in recent_tests:
+            observation = item["observation"]
+            summary = (observation.get("error") or observation.get("output") or "").splitlines()
+            lines.append(
+                f"  - step {item.get('step')}: {observation.get('tool_name')} "
+                f"[{observation.get('status')}] {summary[0][:160] if summary else ''}"
+            )
+
+    recent_patches = patches[-3:]
+    if recent_patches:
+        lines.append("- Last patch attempts:")
+        for item in recent_patches:
+            patch = item.get("patch") if isinstance(item.get("patch"), dict) else {}
+            findings = item.get("error") or ""
+            reverse_ready = "yes" if item.get("reverse_patch") else "no"
+            lines.append(
+                f"  - step {item.get('step')}: {item.get('tool_name')} "
+                f"path={patch.get('path') or '-'} success={item.get('success')} "
+                f"conflict={item.get('conflict')} reverse_patch={reverse_ready} "
+                f"{findings[:120]}"
+            )
+
+    recent_reviews = [
+        event["payload"]
+        for event in events
+        if event["event_type"] == EventType.OBSERVATION.value
+        and event["payload"]["observation"].get("tool_name") in {"self_review", "patch_review"}
+    ][-2:]
+    if recent_reviews:
+        lines.append("- Last review findings:")
+        for item in recent_reviews:
+            observation = item["observation"]
+            findings = (observation.get("metadata") or {}).get("findings", [])
+            lines.append(
+                f"  - step {item.get('step')}: {observation.get('tool_name')} "
+                f"[{observation.get('status')}] {', '.join(findings) if findings else observation.get('error') or observation.get('output')}"
+            )
+
+    return lines
 
 
 def _finalize_manifest(

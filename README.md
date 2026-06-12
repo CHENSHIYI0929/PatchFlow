@@ -77,6 +77,7 @@ agent run --task "..." --sandbox         # Docker 沙箱
 - `run_manifest.json`：模型配置、代码版本、任务版本、运行环境与 workspace 元数据
 - `retrievals.json`：repo-map、搜索命中和 `graph_neighbors` 查询
 - `patches.json`：每次 `apply_patch` / `revert_patch` / `file_write` 的结构化记录，含 reverse patch 和冲突信息
+- `memory_hits.json`：本次 run 实际注入的 long memory 线索、成功模式和恢复提示
 - `final_diff.patch`：最终 git diff（如有）
 
 你也可以直接汇总这些工件：
@@ -138,6 +139,7 @@ agent 自身也会把 coding 能力相关的信号写入 artifacts 和 benchmark
 - `auto_symbol_probes`：测试失败后是否自动用 `find_symbol` 追踪错误里出现的函数、类或测试名
 - `first_pass_success_rate`：benchmark 中“第一次结束验证就通过”的比例，用来观察 agent 是否越来越少靠多轮修补过关
 - `long_memory_hits` / `context_compressions`：长期记忆是否命中、旧上下文是否被压缩保留下来
+- 长期记忆现在会优先命中同 `category` / `expected_failure_type` 的成功经验，压缩后会继续保留成功模式和失败轨迹摘要
 
 ### GitHub Issue 自动修复
 
@@ -248,9 +250,11 @@ PatchFlow/
 测试失败后会自动结合图关系排序候选文件，优先 `file_read` 显式 `target_files`，再用 `graph_neighbors` 探测相关模块；如果失败输出里出现函数、类或测试名，还会自动调用 `find_symbol` 做符号级追踪，把结果写回上下文。
 
 **长记忆 + 上下文压缩**
-- 每次运行会把任务、结果、failure taxonomy、测试命令和经验写入 `logs/memory/run_memory.jsonl`
-- 新任务开始时会按 repo 和任务关键词检索相关经验，并以 `[LONG MEMORY]` 片段注入上下文
-- 对话历史超过窗口后，旧消息会先压缩成 `[COMPRESSED CONTEXT]` 摘要，再继续参与后续 prompt
+- 每次运行会把原始运行记录写入 `logs/memory/run_memory.jsonl`
+- 成功 run 还会额外抽成 `logs/memory/experience_memory.jsonl`，形成更干净的成功经验库
+- `experience_memory.jsonl` 会按稳定经验签名去重，避免同一类成功 lesson 反复堆积
+- 新任务开始时会按 repo、任务关键词、`category`、`failure_type` 检索相关经验，并先注入聚合后的成功模式 / 恢复提示，再附具体历史 run
+- 对话历史超过窗口后，旧消息会先压缩成 `[COMPRESSED CONTEXT]` 摘要；压缩器会优先保留失败轨迹和 long memory 里的成功模式，而不是只保留普通 observation
 - benchmark metrics 会记录 `long_memory_hits` 和 `context_compressions`
 
 **流式输出**
@@ -286,8 +290,9 @@ repo 通过 bind mount 双向同步，默认断网。
 - 自动导出 `events.json`、`metrics.json`、`retrievals.json`、`patches.json`
 - `patches.json` 记录 `reverse_patch`、冲突和回滚信息，便于 `benchmark patch-replay`
 - `metrics.json` 和 benchmark summary 会记录结束前验证、自审失败、taxonomy recovery、自动符号探测等能力指标
-- `final_report.md` 汇总成功状态、修改原因、候选检索、edit plan、review、测试和回滚方式
+- `final_report.md` 汇总成功状态、修改原因、候选检索、memory hints、edit plan、review、测试和回滚方式
 - run / benchmark 会追加 `logs/memory/run_memory.jsonl`，沉淀任务、失败类型和运行摘要，方便后续做经验检索
+- 成功样本还会同步写入 `logs/memory/experience_memory.jsonl`，便于按 `category` / `failure_type` 复用成功模式
 - 支持完整回放和基础 benchmark 指标分析
 
 ---

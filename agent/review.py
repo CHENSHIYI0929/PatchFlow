@@ -77,7 +77,7 @@ def review_patch_metadata(
             findings.append(f"Patch contains unresolved marker or debug hook: {marker}")
             risk = "high"
 
-    normalized = Path(path).as_posix()
+    normalized = Path(path).as_posix() if path else ""
     for excluded in exclude_paths or []:
         excluded_norm = Path(excluded).as_posix().rstrip("/")
         if normalized == excluded_norm or normalized.startswith(excluded_norm + "/"):
@@ -89,6 +89,9 @@ def review_patch_metadata(
         risk = "high"
 
     stats = metadata.get("stats") or {}
+    findings.extend(_edit_plan_consistency_findings(metadata, normalized))
+    if any("EDIT_PLAN" in finding for finding in findings):
+        risk = "high"
     if patch.get("patch_type") == "replace_file":
         line_count = int(metadata.get("line_count", 0) or 0)
         if line_count > 300:
@@ -111,6 +114,24 @@ def review_patch_metadata(
 def _looks_like_test_path(path: str) -> bool:
     name = Path(path).name
     return path.startswith("tests/") or name.startswith("test_") or name.endswith("_test.py")
+
+
+def _edit_plan_consistency_findings(metadata: dict[str, Any], normalized_path: str) -> list[str]:
+    plan = metadata.get("edit_plan")
+    if not isinstance(plan, dict):
+        return []
+    targets = [
+        Path(str(item)).as_posix()
+        for item in plan.get("target_files", [])
+        if str(item).strip()
+    ]
+    if not targets:
+        return ["EDIT_PLAN did not declare any target_files for the applied patch."]
+    if not normalized_path:
+        return []
+    if any(normalized_path == target or normalized_path.endswith("/" + target) for target in targets):
+        return []
+    return [f"EDIT_PLAN targeted {targets}, but the applied patch modified {normalized_path}."]
 
 
 def _max_risk(left: str, right: str) -> str:

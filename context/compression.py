@@ -25,7 +25,9 @@ class CompressionSummary:
     observations: list[str] = field(default_factory=list)
     files: list[str] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
+    failure_trajectories: list[str] = field(default_factory=list)
     reflections: list[str] = field(default_factory=list)
+    memory_patterns: list[str] = field(default_factory=list)
 
     def to_text(self) -> str:
         if self.message_count == 0:
@@ -39,6 +41,10 @@ class CompressionSummary:
             sections.append("Important older observations: " + "; ".join(self.observations[-5:]))
         if self.failures:
             sections.append("Known failures: " + "; ".join(self.failures[-5:]))
+        if self.failure_trajectories:
+            sections.append("Failure trajectory to preserve: " + "; ".join(self.failure_trajectories[-5:]))
+        if self.memory_patterns:
+            sections.append("Prior successful patterns: " + "; ".join(self.memory_patterns[-4:]))
         if self.files:
             sections.append("Files mentioned: " + ", ".join(self.files[-12:]))
         if self.reflections:
@@ -52,7 +58,9 @@ class CompressionSummary:
             "observations": self.observations,
             "files": self.files,
             "failures": self.failures,
+            "failure_trajectories": self.failure_trajectories,
             "reflections": self.reflections,
+            "memory_patterns": self.memory_patterns,
         }
 
     @classmethod
@@ -65,7 +73,9 @@ class CompressionSummary:
             observations=list(data.get("observations") or []),
             files=list(data.get("files") or []),
             failures=list(data.get("failures") or []),
+            failure_trajectories=list(data.get("failure_trajectories") or []),
             reflections=list(data.get("reflections") or []),
+            memory_patterns=list(data.get("memory_patterns") or []),
         )
 
 
@@ -98,10 +108,16 @@ class ContextCompressor:
 
     def _collect_user_context(self, summary: CompressionSummary, content: str) -> None:
         lowered = content.lower()
+        if content.startswith("[LONG MEMORY]"):
+            self._collect_long_memory(summary, content)
+            return
         if "failed" in lowered or "error" in lowered or "traceback" in lowered:
-            summary.failures.append(self._clip(self._first_signal_line(content), 140))
+            signal = self._clip(self._failure_signal_line(content), 140)
+            summary.failures.append(signal)
+            summary.failure_trajectories.append(signal)
         elif content.startswith("[REFLECTION]") or content.startswith("[RECOVERY]"):
             summary.reflections.append(self._clip(self._first_signal_line(content), 140))
+            summary.failure_trajectories.append(self._clip(self._first_signal_line(content), 140))
         elif "Observation" in content or "Output:" in content:
             summary.observations.append(self._clip(self._first_signal_line(content), 140))
 
@@ -113,10 +129,45 @@ class ContextCompressor:
                 seen.add(path)
 
     def _cap(self, summary: CompressionSummary) -> None:
-        for field_name in ("actions", "observations", "files", "failures", "reflections"):
+        for field_name in (
+            "actions",
+            "observations",
+            "files",
+            "failures",
+            "failure_trajectories",
+            "reflections",
+            "memory_patterns",
+        ):
             values = getattr(summary, field_name)
             if len(values) > self._max_items:
                 setattr(summary, field_name, values[-self._max_items:])
+
+    def _collect_long_memory(self, summary: CompressionSummary, content: str) -> None:
+        current_section: str | None = None
+        for line in content.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("Successful patterns for"):
+                summary.memory_patterns.append(self._clip(stripped, 160))
+                current_section = "success"
+            elif stripped.startswith("Recovery hints for"):
+                summary.failure_trajectories.append(self._clip(stripped, 160))
+                current_section = "recovery"
+            elif "Lessons:" in stripped:
+                lessons = stripped.split("Lessons:", 1)[1].split(";")
+                for lesson in lessons[:2]:
+                    lesson_text = lesson.strip()
+                    if lesson_text:
+                        summary.memory_patterns.append(self._clip(lesson_text, 140))
+            elif stripped.startswith("- "):
+                item = stripped[2:].strip()
+                if not item or item.startswith("status="):
+                    continue
+                if current_section == "recovery":
+                    summary.failure_trajectories.append(self._clip(item, 140))
+                else:
+                    summary.memory_patterns.append(self._clip(item, 140))
 
     def _line_after_prefix(self, content: str, prefix: str) -> str | None:
         for line in content.splitlines():
@@ -130,6 +181,16 @@ class ContextCompressor:
             if stripped:
                 return stripped
         return content.strip()
+
+    def _failure_signal_line(self, content: str) -> str:
+        for line in content.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            lowered = stripped.lower()
+            if "failed" in lowered or "traceback" in lowered or "assert" in lowered or "error:" in lowered:
+                return stripped
+        return self._first_signal_line(content)
 
     def _clip(self, text: str, limit: int) -> str:
         if len(text) <= limit:

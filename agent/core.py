@@ -96,6 +96,7 @@ class AgentConfig:
     thought_callback: object = None        # StreamCallback，推理过程流式回调（推理模型专用）
     confirm_dangerous: bool = False        # 是否对危险命令要求用户确认
     confirm_callback: object = None        # ConfirmCallback，None=跳过确认
+    progress_callback: object = None       # 可选：向父进程上报中间进度
 
 
 
@@ -190,6 +191,7 @@ class Agent:
         steps_without_edit = 0
         edits_made = False
         logged_compressed_count = history.compressed_message_count
+        self._emit_progress(task=task, step=0, total_tokens=0, state="started")
 
         for step in range(1, task.max_steps + 1):
             logger.debug("Step %d/%d", step, task.max_steps)
@@ -215,6 +217,7 @@ class Agent:
                     failure_stage=FAILURE_STAGE_AGENT_LOOP,
                 )
                 log.log_task_failed(steps=step, **failure_info.to_dict())
+                self._emit_progress(task=task, step=step, total_tokens=total_tokens, state="failed")
                 return RunResult(
                     task_id=task.task_id,
                     status=RunStatus.FAILED,
@@ -240,6 +243,7 @@ class Agent:
                 logger.warning(reason)
                 failure_info = self._infer_failure_from_log(log, reason)
                 log.log_task_failed(steps=step, **failure_info.to_dict())
+                self._emit_progress(task=task, step=step, total_tokens=total_tokens, state="failed")
                 return RunResult(
                     task_id=task.task_id,
                     status=RunStatus.GAVE_UP,
@@ -271,6 +275,7 @@ class Agent:
                 ):
                     continue
                 log.log_task_complete(steps=step, summary=summary)
+                self._emit_progress(task=task, step=step, total_tokens=total_tokens, state="completed")
                 return RunResult(
                     task_id=task.task_id,
                     status=RunStatus.SUCCESS,
@@ -284,6 +289,7 @@ class Agent:
                 reason = action.message or "Agent gave up."
                 failure_info = self._infer_failure_from_log(log, reason)
                 log.log_task_failed(steps=step, **failure_info.to_dict())
+                self._emit_progress(task=task, step=step, total_tokens=total_tokens, state="gave_up")
                 return RunResult(
                     task_id=task.task_id,
                     status=RunStatus.GAVE_UP,
@@ -314,6 +320,7 @@ class Agent:
                     steps_without_edit += 1
 
                 log.log_observation(step=step, observation=observation)
+                self._emit_progress(task=task, step=step, total_tokens=total_tokens, state="running")
 
                 if tc.name in WRITE_TOOLS and observation.is_success():
                     self._review_patch_observation(
@@ -353,6 +360,7 @@ class Agent:
                         "The current code already satisfies the requested fix."
                     )
                     log.log_task_complete(steps=step, summary=summary)
+                    self._emit_progress(task=task, step=step, total_tokens=total_tokens, state="completed")
                     return RunResult(
                         task_id=task.task_id,
                         status=RunStatus.SUCCESS,
@@ -374,6 +382,7 @@ class Agent:
                         "without waiting for another model response."
                     )
                     log.log_task_complete(steps=step, summary=summary)
+                    self._emit_progress(task=task, step=step, total_tokens=total_tokens, state="completed")
                     return RunResult(
                         task_id=task.task_id,
                         status=RunStatus.SUCCESS,
@@ -447,6 +456,7 @@ class Agent:
         reason = f"Reached max_steps limit ({task.max_steps})"
         failure_info = self._infer_failure_from_log(log, reason)
         log.log_task_failed(steps=task.max_steps, **failure_info.to_dict())
+        self._emit_progress(task=task, step=task.max_steps, total_tokens=total_tokens, state="max_steps")
         return RunResult(
             task_id=task.task_id,
             status=RunStatus.MAX_STEPS,
@@ -503,9 +513,15 @@ class Agent:
             self._cfg.log_dir,
             query=task.description,
             repo_path=task.source_repo_path or task.repo_path,
+            category=task.task_category,
+            failure_type=task.expected_failure_type,
             limit=self._cfg.long_memory_limit,
         )
-        memory_text = format_memory_hits(hits)
+        memory_text = format_memory_hits(
+            hits,
+            category=task.task_category,
+            failure_type=task.expected_failure_type,
+        )
         if not memory_text:
             return
         log.log_reflection(step=0, reason="long_memory", prompt=memory_text)
@@ -530,6 +546,21 @@ class Agent:
         if observation.error and not observation.is_success():
             lines.append(f"Error: {observation.error}")
         return "\n".join(lines)
+
+    def _emit_progress(self, *, task: Task, step: int, total_tokens: int, state: str) -> None:
+        callback = self._cfg.progress_callback
+        if callback is None:
+            return
+        payload = {
+            "task_id": task.task_id,
+            "steps_taken": step,
+            "total_tokens": total_tokens,
+            "state": state,
+        }
+        try:
+            callback(payload)
+        except Exception:
+            logger.debug("Progress callback failed", exc_info=True)
 
     def _is_looping(self, log: EventLog) -> bool:
         """

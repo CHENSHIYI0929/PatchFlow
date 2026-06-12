@@ -1054,6 +1054,44 @@ class TestCliBenchmark:
         runner = CliRunner()
 
         def fake_execute_run(*args, **kwargs):
+            from agent.event_log import EventLog
+            from agent.task import Observation, ObservationStatus, Task
+
+            manifest = kwargs["manifest"]
+            progress_queue = kwargs.get("progress_queue")
+            task = Task(
+                description=kwargs["description"],
+                repo_path=str(kwargs["repo_path"]),
+                source_repo_path=kwargs["source_repo_path"],
+                task_id=manifest["task_id"],
+                task_file=kwargs["task_file"],
+                test_cmd=kwargs["test_cmd"],
+                exclude_paths=kwargs["exclude_paths"] or [],
+                target_files=kwargs["target_files"] or [],
+                finish_if_verified=kwargs["finish_if_verified"],
+                max_steps=kwargs["config"].agent.max_steps,
+                budget_tokens=kwargs["config"].agent.budget_tokens,
+            )
+            with EventLog.create(task, log_dir=kwargs["config"].agent.log_dir) as log:
+                log.log_task_start(task)
+                log.log_observation(
+                    step=1,
+                    observation=Observation(
+                        status=ObservationStatus.SUCCESS,
+                        output="partial progress",
+                        tool_name="search_text",
+                    ),
+                )
+                if progress_queue is not None:
+                    progress_queue.put(
+                        {
+                            "task_id": task.task_id,
+                            "steps_taken": 1,
+                            "total_tokens": 321,
+                            "state": "running",
+                            "log_path": str(log.path),
+                        }
+                    )
             time.sleep(2.0)
             raise AssertionError("timeout wrapper should interrupt before this point")
 
@@ -1078,11 +1116,19 @@ class TestCliBenchmark:
         artifact_root = tmp_path / "logs" / "artifacts"
         artifact_dirs = [p for p in artifact_root.iterdir() if p.is_dir()]
         assert artifact_dirs
-        result_payload = (artifact_dirs[0] / "result.json").read_text(encoding="utf-8")
+        result_payload = json.loads((artifact_dirs[0] / "result.json").read_text(encoding="utf-8"))
+        metrics_payload = json.loads((artifact_dirs[0] / "metrics.json").read_text(encoding="utf-8"))
+        events_payload = json.loads((artifact_dirs[0] / "events.json").read_text(encoding="utf-8"))
         manifest_payload = (artifact_dirs[0] / "run_manifest.json").read_text(encoding="utf-8")
         assert "0/1 succeeded" in result.output
-        assert '"failure_type": "timeout"' in result_payload
-        assert '"failure_stage": "agent_loop"' in result_payload
+        assert result_payload["failure_type"] == "timeout"
+        assert result_payload["failure_stage"] == "agent_loop"
+        assert result_payload["steps_taken"] == 1
+        assert result_payload["total_tokens"] == 321
+        assert metrics_payload["steps_taken"] == 1
+        assert metrics_payload["total_tokens"] == 321
+        assert metrics_payload["retrieval_queries"] == 1
+        assert any(event["event_type"] == "task_failed" for event in events_payload)
         assert '"task_timeout_seconds": 1' in manifest_payload
 
 

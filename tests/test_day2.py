@@ -21,10 +21,11 @@ import pytest
 
 from agent.core import Agent, AgentConfig
 from agent.event_log import EventLog
+from agent.review import review_patch_metadata
 from agent.task import Action, ActionType, RunStatus, Task, ToolCall
 from llm.base import MockBackend
 from tools.base import FailingTool, NoopTool, ToolRegistry, ToolResult
-from tools.file_tool import ApplyPatchTool
+from tools.file_tool import ApplyPatchTool, FileWriteTool
 
 
 # ---------------------------------------------------------------------------
@@ -950,6 +951,35 @@ class TestFinishVerification:
             e.event_type.value == "reflection" and e.payload["reason"] == "self_review_failed"
             for e in events
         )
+
+    def test_patch_review_flags_edit_plan_path_mismatch(self):
+        review = review_patch_metadata(
+            {
+                "patch": {"patch_type": "replace_file", "path": "src/actual.py", "content": "x = 1\n"},
+                "edit_plan": {
+                    "target_files": ["src/expected.py"],
+                    "risk_level": "low",
+                    "change_intent": "update expected",
+                },
+                "line_count": 1,
+                "stats": {"operation": "replace_file"},
+            }
+        )
+
+        assert review.success is False
+        assert review.risk_level == "high"
+        assert any("EDIT_PLAN targeted" in item for item in review.findings)
+
+    def test_file_write_exposes_patch_metadata_for_review(self, tmp_path):
+        tool = FileWriteTool()
+        target = tmp_path / "demo.py"
+
+        result = tool.execute({"path": str(target), "content": "x = 1\n"})
+
+        assert result.success is True
+        assert result.metadata["patch"]["path"] == str(target)
+        assert result.metadata["patch"]["patch_type"] == "replace_file"
+        assert result.metadata["stats"]["operation"] == "replace_file"
 
     def test_finish_verification_failure_feeds_back_into_next_round(self, tmp_path):
         task = Task(

@@ -545,6 +545,7 @@ class TestArtifactExport:
         assert (artifact_dir / "metrics.json").exists()
         assert (artifact_dir / "result.json").exists()
         assert (artifact_dir / "retrievals.json").exists()
+        assert (artifact_dir / "memory_hits.json").exists()
         assert (artifact_dir / "patches.json").exists()
         assert (artifact_dir / "final_diff.patch").exists()
         assert (artifact_dir / "final_report.md").exists()
@@ -773,3 +774,120 @@ class TestArtifactExport:
         artifact_dir = export_run_artifacts(log, result, elapsed_seconds=0.5)
 
         assert (artifact_dir / "final_report.md").exists()
+
+    def test_final_report_summarizes_failure_trajectory(self, sample_task, tmp_log_dir):
+        with EventLog.create(sample_task, log_dir=str(tmp_log_dir)) as log:
+            log.log_task_start(sample_task)
+            log.log_action(
+                step=1,
+                action=Action(
+                    ActionType.TOOL_CALL,
+                    "Inspect the failing test output.",
+                    ToolCall("test", {"path": "tests/test_demo.py::test_case"}),
+                ),
+            )
+            log.log_observation(
+                step=1,
+                observation=Observation(
+                    status=ObservationStatus.ERROR,
+                    output="FAILED tests/test_demo.py::test_case - AssertionError: boom",
+                    tool_name="verify_task",
+                    error="Exit code: 1",
+                ),
+            )
+            log.log_action(
+                step=2,
+                action=Action(
+                    ActionType.TOOL_CALL,
+                    "Apply a focused patch.",
+                    ToolCall("apply_patch", {"patch": "*** Begin Patch\n*** End Patch\n"}),
+                ),
+            )
+            log.log_observation(
+                step=2,
+                observation=Observation(
+                    status=ObservationStatus.ERROR,
+                    output="Patch failed to apply cleanly",
+                    tool_name="apply_patch",
+                    error="patch conflict near demo.py",
+                    metadata={
+                        "patch": {"patch_type": "replace_range", "path": "demo.py"},
+                        "reverse_patch": None,
+                    },
+                ),
+            )
+            log.log_observation(
+                step=3,
+                observation=Observation(
+                    status=ObservationStatus.ERROR,
+                    output="Patch review found risk signals.",
+                    tool_name="patch_review",
+                    error="Patch modifies unrelated code",
+                    metadata={"findings": ["Patch modifies unrelated code"]},
+                ),
+            )
+            log.log_task_failed(
+                steps=2,
+                reason="Timed out after retrying patch application",
+                failure_type="timeout",
+                failure_stage="agent_loop",
+                failure_message="patch conflict near demo.py",
+            )
+
+        result = RunResult(
+            task_id=sample_task.task_id,
+            status=RunStatus.FAILED,
+            summary="Timed out after retrying patch application",
+            steps_taken=2,
+            total_tokens=44,
+            failure_type="timeout",
+            failure_stage="agent_loop",
+            failure_message="patch conflict near demo.py",
+        )
+
+        artifact_dir = export_run_artifacts(log, result, elapsed_seconds=3.5)
+        report = (artifact_dir / "final_report.md").read_text(encoding="utf-8")
+
+        assert "## Failure Trajectory" in report
+        assert "Failure taxonomy: timeout @ agent_loop" in report
+        assert "Last actions:" in report
+        assert "Last verification outputs:" in report
+        assert "Last patch attempts:" in report
+        assert "conflict=True" in report
+        assert "Last review findings:" in report
+
+    def test_final_report_includes_memory_hints(self, sample_task, tmp_log_dir):
+        with EventLog.create(sample_task, log_dir=str(tmp_log_dir)) as log:
+            log.log_task_start(sample_task)
+            log.log_reflection(
+                step=0,
+                reason="long_memory",
+                prompt=(
+                    "[LONG MEMORY] Relevant prior run memories:\n"
+                    "Successful patterns for category=bugfix:\n"
+                    "- Prefer targeted verification first: pytest tests/test_demo.py -q\n"
+                    "Recovery hints for failure_type=verification_failed:\n"
+                    "- Previous failure was classified as verification_failed; recover using the matching taxonomy strategy.\n"
+                    "- status=success steps=2 memory=experience category=bugfix test_cmd=pytest tests/test_demo.py -q :: Fixed demo"
+                ),
+            )
+            log.log_task_complete(steps=1, summary="done")
+
+        result = RunResult(
+            task_id=sample_task.task_id,
+            status=RunStatus.SUCCESS,
+            summary="done",
+            steps_taken=1,
+            total_tokens=5,
+        )
+
+        artifact_dir = export_run_artifacts(log, result, elapsed_seconds=0.5)
+        report = (artifact_dir / "final_report.md").read_text(encoding="utf-8")
+        memory_hits = json.loads((artifact_dir / "memory_hits.json").read_text(encoding="utf-8"))
+        metrics = json.loads((artifact_dir / "metrics.json").read_text(encoding="utf-8"))
+
+        assert "## Memory Hints" in report
+        assert "Prefer targeted verification first" in report
+        assert any(item.get("memory_kind") == "experience" for item in memory_hits)
+        assert metrics["memory_hit_count"] >= 1
+        assert metrics["experience_memory_hits"] >= 1

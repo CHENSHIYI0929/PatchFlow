@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from agent.memory import append_run_memory, format_memory_hits, search_memories
+from agent.memory import append_run_memory, format_memory_hits, load_experience_memories, search_memories
 from context.history import ConversationHistory
 from context.repo_map import RepoMap, _extract_python_symbols, _extract_symbols_regex
 from context.token_budget import TokenBudget, estimate_tokens
@@ -351,6 +351,30 @@ class TestConversationHistory:
         dicts = h.to_dicts()
         assert dicts[1]["content"].startswith("[COMPRESSED CONTEXT]")
 
+    def test_compression_preserves_long_memory_patterns_and_failure_trajectory(self):
+        h = ConversationHistory(max_messages=3)
+        h.add(LLMMessage(role="user", content="Task: fix parser.py"))
+        h.add(LLMMessage(
+            role="user",
+            content=(
+                "[LONG MEMORY] Relevant prior run memories:\n"
+                "Successful patterns for category=bugfix:\n"
+                "- Prefer targeted verification first: pytest tests/test_parser.py -q\n"
+                "Recovery hints for failure_type=verification_failed:\n"
+                "- Previous failure was classified as verification_failed; recover using the matching taxonomy strategy."
+            ),
+        ))
+        h.add(LLMMessage(role="user", content="[Tool: test | ERROR]\nFAILED tests/test_parser.py::test_empty - AssertionError"))
+        h.add(LLMMessage(role="user", content="[REFLECTION] Re-check parser.py before retrying the patch."))
+        h.add(LLMMessage(role="assistant", content="Thought: inspect failure\nAction: file_read"))
+
+        summary = h.compressed_summary
+        assert "Prior successful patterns" in summary
+        assert "Prefer targeted verification first" in summary
+        assert "Failure trajectory to preserve" in summary
+        assert "verification_failed" in summary
+        assert "FAILED tests/test_parser.py::test_empty" in summary
+
     def test_first_message_never_dropped(self):
         h = ConversationHistory(max_messages=2)
         h.add(LLMMessage(role="user", content="task_description"))
@@ -380,6 +404,8 @@ class TestLongMemory:
             task_id="mem001",
             description="Fix parser empty string handling",
             repo_path=str(tmp_path),
+            task_category="bugfix",
+            expected_failure_type="verification_failed",
             test_cmd="pytest tests/test_parser.py -q",
         )
         result = RunResult(
@@ -395,16 +421,71 @@ class TestLongMemory:
             tmp_path / "logs",
             query="parser empty string bug",
             repo_path=tmp_path,
+            category="bugfix",
+            failure_type="verification_failed",
             limit=3,
         )
 
         assert hits
-        text = format_memory_hits(hits)
+        text = format_memory_hits(hits, category="bugfix", failure_type="verification_failed")
         assert "LONG MEMORY" in text
         assert "pytest tests/test_parser.py -q" in text
+        assert "Successful patterns for category=bugfix" in text
+
+    def test_search_memories_prioritizes_matching_category_and_failure_type(self, tmp_path):
+        related = Task(
+            task_id="mem-cat-a",
+            description="Fix parser empty string handling",
+            repo_path=str(tmp_path),
+            task_category="bugfix",
+            expected_failure_type="verification_failed",
+            test_cmd="pytest tests/test_parser.py -q",
+        )
+        unrelated = Task(
+            task_id="mem-cat-b",
+            description="Fix parser empty string handling",
+            repo_path=str(tmp_path),
+            task_category="refactor_safe",
+            expected_failure_type="verification_failed",
+            test_cmd="pytest tests/test_parser.py -q",
+        )
+        related_success = RunResult(
+            task_id=related.task_id,
+            status=RunStatus.SUCCESS,
+            summary="Fixed parser empty string handling",
+            steps_taken=3,
+            total_tokens=100,
+        )
+        unrelated_success = RunResult(
+            task_id=unrelated.task_id,
+            status=RunStatus.SUCCESS,
+            summary="Fixed parser empty string handling",
+            steps_taken=3,
+            total_tokens=100,
+        )
+        append_run_memory(tmp_path / "logs", unrelated, unrelated_success)
+        append_run_memory(tmp_path / "logs", related, related_success)
+
+        hits = search_memories(
+            tmp_path / "logs",
+            query="parser empty string bug",
+            repo_path=tmp_path,
+            category="bugfix",
+            failure_type="verification_failed",
+            limit=2,
+        )
+
+        assert hits
+        assert hits[0].payload["task_category"] == "bugfix"
 
     def test_memory_file_is_jsonl(self, tmp_path):
-        task = Task(task_id="mem002", description="Fix auth", repo_path=str(tmp_path))
+        task = Task(
+            task_id="mem002",
+            description="Fix auth",
+            repo_path=str(tmp_path),
+            task_category="bugfix",
+            expected_failure_type="verification_failed",
+        )
         result = RunResult(
             task_id=task.task_id,
             status=RunStatus.FAILED,
@@ -418,7 +499,57 @@ class TestLongMemory:
 
         row = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
         assert row["task_description"] == "Fix auth"
+        assert row["task_category"] == "bugfix"
+        assert row["expected_failure_type"] == "verification_failed"
         assert row["lessons"]
+
+    def test_successful_runs_append_experience_memory(self, tmp_path):
+        task = Task(
+            task_id="memexp1",
+            description="Fix parser",
+            repo_path=str(tmp_path),
+            task_category="bugfix",
+            expected_failure_type="verification_failed",
+            test_cmd="pytest tests/test_parser.py -q",
+        )
+        result = RunResult(
+            task_id=task.task_id,
+            status=RunStatus.SUCCESS,
+            summary="Fixed parser",
+            steps_taken=2,
+            total_tokens=10,
+        )
+
+        append_run_memory(tmp_path / "logs", task, result)
+
+        rows = load_experience_memories(tmp_path / "logs", limit=5)
+        assert rows
+        assert rows[-1]["memory_kind"] == "experience"
+        assert rows[-1]["task_category"] == "bugfix"
+        assert rows[-1]["test_cmd"] == "pytest tests/test_parser.py -q"
+
+    def test_experience_memory_deduplicates_same_success_pattern(self, tmp_path):
+        task = Task(
+            task_id="memexp2",
+            description="Fix parser",
+            repo_path=str(tmp_path),
+            task_category="bugfix",
+            expected_failure_type="verification_failed",
+            test_cmd="pytest tests/test_parser.py -q",
+        )
+        result = RunResult(
+            task_id=task.task_id,
+            status=RunStatus.SUCCESS,
+            summary="Fixed parser",
+            steps_taken=2,
+            total_tokens=10,
+        )
+
+        append_run_memory(tmp_path / "logs", task, result)
+        append_run_memory(tmp_path / "logs", task, result)
+
+        rows = load_experience_memories(tmp_path / "logs", limit=10)
+        assert len(rows) == 1
 
     def test_from_dicts(self):
         dicts = [{"role": "user", "content": "task"}, {"role": "assistant", "content": "ok"}]
@@ -553,6 +684,8 @@ class TestCoreWithContext:
             task_id="prior001",
             description="Fix parser empty input",
             repo_path=str(tmp_path),
+            task_category="bugfix",
+            expected_failure_type="verification_failed",
             test_cmd="pytest tests/test_parser.py -q",
         )
         append_run_memory(
@@ -570,6 +703,8 @@ class TestCoreWithContext:
             task_id="ctxmem1",
             description="Fix parser empty input again",
             repo_path=str(tmp_path),
+            task_category="bugfix",
+            expected_failure_type="verification_failed",
             max_steps=2,
         )
         registry = ToolRegistry().register(NoopTool("shell"))
@@ -589,8 +724,42 @@ class TestCoreWithContext:
         assert result.is_success()
         first_messages = backend.received_messages[0]
         assert any("LONG MEMORY" in msg.content for msg in first_messages)
+        assert any("Successful patterns for category=bugfix" in msg.content for msg in first_messages)
         assert any(
             event.event_type.value == "reflection"
             and event.payload.get("reason") == "long_memory"
             for event in events
         )
+
+    def test_long_memory_prefers_experience_memory_entries(self, tmp_path):
+        prior_task = Task(
+            task_id="prior-exp",
+            description="Fix parser empty input",
+            repo_path=str(tmp_path),
+            task_category="bugfix",
+            expected_failure_type="verification_failed",
+            test_cmd="pytest tests/test_parser.py -q",
+        )
+        append_run_memory(
+            tmp_path / "logs",
+            prior_task,
+            RunResult(
+                task_id=prior_task.task_id,
+                status=RunStatus.SUCCESS,
+                summary="Fixed parser empty input",
+                steps_taken=2,
+                total_tokens=50,
+            ),
+        )
+
+        hits = search_memories(
+            tmp_path / "logs",
+            query="parser empty input bug",
+            repo_path=tmp_path,
+            category="bugfix",
+            failure_type="verification_failed",
+            limit=3,
+        )
+
+        assert hits
+        assert hits[0].payload.get("memory_kind") == "experience"

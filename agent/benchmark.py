@@ -148,6 +148,8 @@ def try_preverify_task(
         repo_path=str(repo),
         source_repo_path=str(repo),
         task_id=str(uuid.uuid4())[:8],
+        task_category=spec.category,
+        expected_failure_type=spec.expected_failure_type,
         test_cmd=default_test_cmd_for_spec(spec),
         exclude_paths=spec.exclude_paths or [],
         target_files=spec.target_files or [],
@@ -242,14 +244,19 @@ def export_failed_benchmark_artifact(
     log_dir: str,
     manifest: dict[str, Any] | None,
     failure: FailureInfo,
+    partial_progress: dict[str, Any] | None = None,
+    elapsed_seconds: float = 0.0,
 ) -> tuple[RunResult, Path]:
     repo = Path(repo_path).resolve()
+    partial_progress = partial_progress or {}
     task = Task(
         description=spec.description,
         repo_path=str(repo),
-        source_repo_path=str(repo),
+        source_repo_path=(manifest or {}).get("repo_source") or str(repo),
         task_id=(manifest or {}).get("task_id") or str(uuid.uuid4())[:8],
         task_file=str(spec.path),
+        task_category=spec.category,
+        expected_failure_type=spec.expected_failure_type,
         test_cmd=default_test_cmd_for_spec(spec),
         exclude_paths=spec.exclude_paths or [],
         target_files=spec.target_files or [],
@@ -260,19 +267,45 @@ def export_failed_benchmark_artifact(
         task_id=task.task_id,
         status=RunStatus.FAILED,
         summary=failure.reason,
-        steps_taken=0,
-        total_tokens=0,
+        steps_taken=int(partial_progress.get("steps_taken") or 0),
+        total_tokens=int(partial_progress.get("total_tokens") or 0),
         error=failure.failure_message,
         failure_type=failure.failure_type,
         failure_stage=failure.failure_stage,
         failure_message=failure.failure_message,
     )
-    with EventLog.create(task, log_dir=log_dir) as log:
-        log.log_task_start(task)
-        log.log_task_failed(steps=0, **failure.to_dict())
-        artifact_dir = export_run_artifacts(log, result, 0.0, manifest=manifest)
+    log_path = _resolve_partial_log_path(
+        log_dir=log_dir,
+        task_id=task.task_id,
+        hinted_path=partial_progress.get("log_path"),
+    )
+    log_factory = EventLog.open_existing(log_path) if log_path else EventLog.create(task, log_dir=log_dir)
+    with log_factory as log:
+        if log_path is None:
+            log.log_task_start(task)
+        log.log_task_failed(steps=result.steps_taken, **failure.to_dict())
+        artifact_dir = export_run_artifacts(log, result, elapsed_seconds, manifest=manifest)
     append_run_memory(log_dir, task, result)
     return result, artifact_dir
+
+
+def _resolve_partial_log_path(
+    *,
+    log_dir: str | Path,
+    task_id: str,
+    hinted_path: str | None,
+) -> Path | None:
+    if hinted_path:
+        candidate = Path(hinted_path)
+        if candidate.exists():
+            return candidate
+    log_root = Path(log_dir)
+    if not log_root.exists():
+        return None
+    candidates = sorted(log_root.glob(f"{task_id}_*.jsonl"))
+    if not candidates:
+        return None
+    return candidates[-1]
 
 
 def build_run_manifest(

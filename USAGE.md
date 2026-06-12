@@ -299,6 +299,7 @@ agent run --task-file task.txt
 - `metrics.json`：基础指标统计
 - `run_manifest.json`：模型配置、代码版本、任务版本、运行环境、source repo / workspace repo
 - `retrievals.json`：检索命中记录
+- `memory_hits.json`：本次 run 真正注入 prompt 的 long memory 线索、成功模式和恢复提示
 - `patches.json`：结构化 patch 轨迹
 - `result.json`：任务结果摘要
 - `final_report.md`：最终人类可读报告，包含候选检索、edit plan、review、测试和回滚方式
@@ -526,7 +527,9 @@ agent benchmark reset-fixtures --repo .
 Markdown report 现在使用固定模板，包含总成功率、任务数、平均 steps、平均 tokens、平均耗时、失败类型分布、每个任务结果、patch 文件和 baseline 对比。
 如果你想重放某次结构化 patch，可以直接用 `benchmark patch-replay`；加 `--reverse` 会重放对应的 `reverse_patch`。
 
-`benchmark run` 还会追加 `logs/memory/run_memory.jsonl`。这不是长期数据库，只是一份轻量 JSONL：记录 task、repo、test command、success、steps、failure taxonomy 和结果摘要，方便后续做经验检索或分析哪些任务类型最容易失败。
+`benchmark run` 还会追加两份本地记忆：
+- `logs/memory/run_memory.jsonl`：原始 run 级记录，保留 task、repo、test command、success、steps、failure taxonomy 和结果摘要。
+- `logs/memory/experience_memory.jsonl`：只收敛成功 run 的经验卡片，方便按 `category` / `failure_type` 复用成功模式；会按稳定经验签名去重，避免重复 lesson 越积越多。
 
 ### V2 运行模式与机制开关
 
@@ -591,7 +594,7 @@ agent benchmark ablation-report --dir ./logs/artifacts --markdown-out ./ablation
 
 - `ConversationHistory`：当前 run / chat 的短期上下文，保留最近消息。
 - `Context compression`：短期上下文超过窗口时，旧消息不会直接丢弃，而是压缩成 `[COMPRESSED CONTEXT]` 摘要。
-- `Long memory`：跨 run 的本地 JSONL 记忆，路径是 `logs/memory/run_memory.jsonl`。
+- `Long memory`：跨 run 的本地 JSONL 记忆，原始记录在 `logs/memory/run_memory.jsonl`，成功经验库在 `logs/memory/experience_memory.jsonl`。
 
 可以在 `config/default.yaml` 里配置：
 
@@ -603,11 +606,15 @@ context:
   long_memory_limit: 5
 ```
 
-新任务开始时，agent 会根据 repo 和任务描述从 long memory 里检索相关记录，并注入类似：
+新任务开始时，agent 会根据 repo、任务描述、`category`、`expected_failure_type` 从 long memory 里检索相关记录，并注入类似：
 
 ```text
 [LONG MEMORY] Relevant prior run memories:
-- status=success steps=3 test_cmd=pytest tests/test_parser.py -q :: Fixed parser empty string handling
+Successful patterns for category=bugfix:
+- Prefer targeted verification first: pytest tests/test_parser.py -q
+Recovery hints for failure_type=verification_failed:
+- Previous failure was classified as verification_failed; recover using the matching taxonomy strategy.
+- status=success steps=3 memory=experience category=bugfix test_cmd=pytest tests/test_parser.py -q :: Fixed parser empty string handling
 ```
 
 当旧上下文被压缩时，后续 prompt 会包含：
@@ -616,10 +623,17 @@ context:
 [COMPRESSED CONTEXT] Summary of 8 older messages.
 Recent older actions: file_read (...); apply_patch (...)
 Known failures: Traceback: ...
+Failure trajectory to preserve: FAILED tests/test_parser.py::test_empty - AssertionError ...
+Prior successful patterns: Prefer targeted verification first: pytest tests/test_parser.py -q
 Files mentioned: parser.py, tests/test_parser.py
 ```
 
-这两个能力都是本地、确定性、无外部依赖的 MVP。后续如果要接 embedding/vector store，可以直接替换 long memory 的检索实现，不需要改 agent loop。
+也就是说，当前版本不是简单“把旧消息缩短”：
+- 成功经验会先被聚合成更短的 pattern card，再注入 prompt
+- 失败轨迹会比普通 observation 更优先保留
+- 即使 long memory 本身后续滑出窗口，它提炼出的成功模式和失败轨迹仍会被 compression 继续保留下来
+
+这两套能力仍然是本地、确定性、无外部依赖的 MVP。后续如果要接 embedding/vector store，可以直接替换 long memory 的检索实现，不需要改 agent loop。
 
 ---
 

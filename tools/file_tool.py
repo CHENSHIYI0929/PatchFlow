@@ -240,6 +240,12 @@ class FileWriteTool(BaseTool):
         return ToolResult(
             success=True,
             output=f"Written {line_count} lines to {path}",
+            metadata={
+                "patch": {"patch_type": "replace_file", "path": str(path), "content": content},
+                "path": str(path),
+                "line_count": line_count,
+                "stats": {"operation": "replace_file"},
+            },
         )
 
 
