@@ -40,6 +40,7 @@ def test_get_nested_returns_default():
 
 def test_dedupe_preserve_order_is_stable():
     assert dedupe_preserve_order(["b", "a", "b"]) == ["b", "a"]
+    assert dedupe_preserve_order(["a", "b", "a"]) == ["a", "b"]
 
 
 def test_public_api_name_new_contract():

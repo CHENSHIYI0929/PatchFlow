@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from agent.artifacts import export_run_artifacts
+from agent.artifacts import _collect_capability_stats, export_run_artifacts
 from agent.event_log import EventLog
 from agent.failure import FailureInfo
 from agent.grader import CommandGrader, CompositeGrader, Grader
@@ -332,7 +332,36 @@ def discover_artifact_dirs(root: str | Path) -> list[Path]:
 def load_metrics(artifact_dir: str | Path) -> dict[str, Any]:
     """Load metrics.json from a single artifact directory."""
     artifact_path = Path(artifact_dir)
-    return json.loads((artifact_path / "metrics.json").read_text(encoding="utf-8"))
+    metrics = json.loads((artifact_path / "metrics.json").read_text(encoding="utf-8"))
+    _backfill_verification_metrics(artifact_path, metrics)
+    return metrics
+
+
+def _backfill_verification_metrics(artifact_path: Path, metrics: dict[str, Any]) -> None:
+    needed = {"verify_task_calls", "targeted_test_calls", "broad_verification_rejections"}
+    if needed <= set(metrics):
+        return
+    events = _load_artifact_events(artifact_path)
+    if not events:
+        return
+    stats = _collect_capability_stats(events)
+    for key in needed:
+        metrics.setdefault(key, stats.get(key, 0))
+
+
+def _load_artifact_events(artifact_path: Path) -> list[dict[str, Any]]:
+    events_jsonl = artifact_path / "events.jsonl"
+    if events_jsonl.exists():
+        return [
+            json.loads(line)
+            for line in events_jsonl.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+    events_json = artifact_path / "events.json"
+    if events_json.exists():
+        data = json.loads(events_json.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    return []
 
 
 def _load_json_if_exists(path: Path) -> dict[str, Any]:
@@ -400,6 +429,9 @@ def _summarize_run_pairs(
         "failure_analyses": 0,
         "edit_plans": 0,
         "patch_review_failures": 0,
+        "verify_task_calls": 0,
+        "targeted_test_calls": 0,
+        "broad_verification_rejections": 0,
         "failure_type_distribution": {},
         "failure_stage_distribution": {},
         "runs": [],
@@ -426,6 +458,9 @@ def _summarize_run_pairs(
     failure_analyses = sum(int(item.get("failure_analyses", 0)) for item in runs)
     edit_plans = sum(int(item.get("edit_plans", 0)) for item in runs)
     patch_review_failures = sum(int(item.get("patch_review_failures", 0)) for item in runs)
+    verify_task_calls = sum(int(item.get("verify_task_calls", 0)) for item in runs)
+    targeted_test_calls = sum(int(item.get("targeted_test_calls", 0)) for item in runs)
+    broad_verification_rejections = sum(int(item.get("broad_verification_rejections", 0)) for item in runs)
     failure_types: dict[str, int] = {}
     failure_stages: dict[str, int] = {}
     for result in results:
@@ -477,6 +512,9 @@ def _summarize_run_pairs(
             "failure_analyses": failure_analyses,
             "edit_plans": edit_plans,
             "patch_review_failures": patch_review_failures,
+            "verify_task_calls": verify_task_calls,
+            "targeted_test_calls": targeted_test_calls,
+            "broad_verification_rejections": broad_verification_rejections,
             "failure_type_distribution": failure_types,
             "failure_stage_distribution": failure_stages,
             "runs": [
@@ -502,6 +540,9 @@ def _summarize_run_pairs(
                     "failure_analyses": int(metrics.get("failure_analyses", 0)),
                     "edit_plans": int(metrics.get("edit_plans", 0)),
                     "patch_review_failures": int(metrics.get("patch_review_failures", 0)),
+                    "verify_task_calls": int(metrics.get("verify_task_calls", 0)),
+                    "targeted_test_calls": int(metrics.get("targeted_test_calls", 0)),
+                    "broad_verification_rejections": int(metrics.get("broad_verification_rejections", 0)),
                     "failure_type": result.get("failure_type"),
                     "failure_stage": result.get("failure_stage"),
                     "failure_message": result.get("failure_message"),
@@ -555,6 +596,9 @@ def compare_artifact_roots(
         "failure_analyses",
         "edit_plans",
         "patch_review_failures",
+        "verify_task_calls",
+        "targeted_test_calls",
+        "broad_verification_rejections",
     ]
 
     deltas = {}

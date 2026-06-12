@@ -205,6 +205,11 @@ def _collect_grading(events: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _collect_capability_stats(events: list[dict[str, Any]]) -> dict[str, int]:
+    actions = [
+        event["payload"]["action"]
+        for event in events
+        if event["event_type"] == EventType.ACTION.value
+    ]
     observations = [
         event["payload"]["observation"]
         for event in events
@@ -222,6 +227,15 @@ def _collect_capability_stats(events: list[dict[str, Any]]) -> dict[str, int]:
         obs for obs in observations
         if (obs.get("metadata") or {}).get("auto_symbol_probe")
     ]
+    verify_task_calls = sum(
+        1 for action in actions
+        if (action.get("tool_call") or {}).get("name") == "verify_task"
+    )
+    targeted_test_calls = sum(1 for action in actions if _is_targeted_test_action(action))
+    broad_verification_rejections = sum(
+        1 for obs in observations
+        if (obs.get("metadata") or {}).get("verification_scope_rejected")
+    )
     return {
         "finish_verification_attempts": len(finish_verifier),
         "finish_verification_failures": sum(1 for obs in finish_verifier if obs.get("status") != "success"),
@@ -235,7 +249,22 @@ def _collect_capability_stats(events: list[dict[str, Any]]) -> dict[str, int]:
         "edit_plans": sum(1 for item in reflections if item.get("reason") == "edit_plan"),
         "patch_review_attempts": len(patch_reviews),
         "patch_review_failures": sum(1 for obs in patch_reviews if obs.get("status") != "success"),
+        "verify_task_calls": verify_task_calls,
+        "targeted_test_calls": targeted_test_calls,
+        "broad_verification_rejections": broad_verification_rejections,
     }
+
+
+def _is_targeted_test_action(action: dict[str, Any]) -> bool:
+    tool_call = action.get("tool_call") or {}
+    name = tool_call.get("name")
+    params = tool_call.get("params") or {}
+    if name == "test":
+        return "::" in str(params.get("path", ""))
+    if name == "shell":
+        cmd = str(params.get("cmd", ""))
+        return "pytest" in cmd and "::" in cmd
+    return False
 
 
 def _render_final_report(

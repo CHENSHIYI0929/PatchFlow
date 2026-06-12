@@ -1459,6 +1459,9 @@ def _render_benchmark_summary_markdown(summary: dict) -> str:
             f"| Failure analyses | {summary['failure_analyses']} |",
             f"| Edit plans | {summary['edit_plans']} |",
             f"| Patch review failures | {summary['patch_review_failures']} |",
+            f"| Verify task calls | {summary.get('verify_task_calls', 0)} |",
+            f"| Targeted test calls | {summary.get('targeted_test_calls', 0)} |",
+            f"| Broad verification rejections | {summary.get('broad_verification_rejections', 0)} |",
             "",
             "## Failure Type Distribution",
             "",
@@ -1504,20 +1507,24 @@ def _render_ablation_markdown(grouped: dict) -> str:
         "",
         f"- Artifact root: `{grouped.get('artifact_root')}`",
         f"- Scope: `{'all-runs' if grouped.get('include_preverified', True) else 'agent-only'}`",
+        "- Verification columns are total observed calls/rejections across each profile.",
+        "- Older artifacts without these metrics are backfilled from `events.jsonl` / `events.json` when available.",
         "",
-        "| Profile | Runs | Success Rate | First-pass | Avg Steps | Avg Tools | Avg Tokens | Patch Success | Failure Analyses | Edit Plans | Patch Review Fails |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Profile | Runs | Success Rate | First-pass | Avg Steps | Avg Tools | Avg Tokens | Patch Success | Verify Task | Targeted Tests | Broad Rejections | Failure Analyses | Edit Plans | Patch Review Fails |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for name, summary in sorted(groups.items()):
         lines.append(
             f"| {name} | {summary['run_count']} | {summary['success_rate']:.2%} | "
             f"{summary['first_pass_success_rate']:.2%} | {summary['avg_steps']} | "
             f"{summary['avg_tool_calls']} | {summary['avg_tokens']} | "
-            f"{summary['patch_success_rate']:.2%} | {summary['failure_analyses']} | "
+            f"{summary['patch_success_rate']:.2%} | {summary.get('verify_task_calls', 0)} | "
+            f"{summary.get('targeted_test_calls', 0)} | {summary.get('broad_verification_rejections', 0)} | "
+            f"{summary['failure_analyses']} | "
             f"{summary['edit_plans']} | {summary['patch_review_failures']} |"
         )
     if not groups:
-        lines.append("| - | 0 | 0.00% | 0.00% | 0 | 0 | 0 | 0.00% | 0 | 0 | 0 |")
+        lines.append("| - | 0 | 0.00% | 0.00% | 0 | 0 | 0 | 0.00% | 0 | 0 | 0 | 0 | 0 | 0 |")
     return "\n".join(lines) + "\n"
 
 

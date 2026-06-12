@@ -324,7 +324,8 @@ class TestCliBenchmark:
         (run_a / "metrics.json").write_text(
             '{"task_success": true, "steps_taken": 4, "total_tokens": 100, '
             '"elapsed_seconds": 1.5, "tool_call_count": 3, "retrieval_queries": 1, '
-            '"retrieval_match_count": 2, "patch_attempts": 1, "patch_successes": 1}',
+            '"retrieval_match_count": 2, "patch_attempts": 1, "patch_successes": 1, '
+            '"verify_task_calls": 2, "targeted_test_calls": 1, "broad_verification_rejections": 0}',
             encoding="utf-8",
         )
         (run_b / "metrics.json").write_text(
@@ -361,6 +362,33 @@ class TestCliBenchmark:
         assert result.exit_code == 0, result.output
         assert '"run_count": 1' in result.output
         assert '"preverified_count": 1' in result.output
+
+    def test_benchmark_summarize_backfills_verification_metrics_from_events(self, tmp_path):
+        artifact_root = tmp_path / "logs" / "artifacts"
+        run_a = artifact_root / "run-a"
+        run_a.mkdir(parents=True)
+        (run_a / "metrics.json").write_text(
+            '{"task_success": true, "steps_taken": 3, "total_tokens": 80, '
+            '"elapsed_seconds": 1.2, "tool_call_count": 2, "retrieval_queries": 0, '
+            '"retrieval_match_count": 0, "patch_attempts": 1, "patch_successes": 1}',
+            encoding="utf-8",
+        )
+        (run_a / "events.json").write_text(
+            '[{"event_type":"action","payload":{"action":{"tool_call":{"name":"verify_task","params":{}}}}},'
+            '{"event_type":"action","payload":{"action":{"tool_call":{"name":"test","params":{"path":"test_demo.py::test_x"}}}}},'
+            '{"event_type":"observation","payload":{"observation":{"tool_name":"test","metadata":{"verification_scope_rejected":true}}}}]',
+            encoding="utf-8",
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["benchmark", "summarize", "--dir", str(artifact_root), "--json-output"],
+        )
+        assert result.exit_code == 0, result.output
+        assert '"verify_task_calls": 1' in result.output
+        assert '"targeted_test_calls": 1' in result.output
+        assert '"broad_verification_rejections": 1' in result.output
 
     def test_benchmark_summarize_only_agent_runs_filters_preverified(self, tmp_path):
         artifact_root = tmp_path / "logs" / "artifacts"
@@ -399,7 +427,8 @@ class TestCliBenchmark:
         (run_a / "metrics.json").write_text(
             '{"task_success": true, "steps_taken": 4, "total_tokens": 100, '
             '"elapsed_seconds": 1.5, "tool_call_count": 3, "retrieval_queries": 1, '
-            '"retrieval_match_count": 2, "patch_attempts": 1, "patch_successes": 1}',
+            '"retrieval_match_count": 2, "patch_attempts": 1, "patch_successes": 1, '
+            '"verify_task_calls": 2, "targeted_test_calls": 1, "broad_verification_rejections": 0}',
             encoding="utf-8",
         )
         (run_a / "result.json").write_text(
@@ -422,6 +451,40 @@ class TestCliBenchmark:
         assert "# Benchmark Summary" in text
         assert "Source Repo" in text
         assert "Workspace Repo" in text
+        assert "Verify task calls" in text
+        assert "| Verify task calls | 2 |" in text
+
+    def test_benchmark_ablation_report_includes_verification_metrics(self, tmp_path):
+        artifact_root = tmp_path / "logs" / "artifacts"
+        run_a = artifact_root / "run-a"
+        report_path = tmp_path / "ablation.md"
+        run_a.mkdir(parents=True)
+        (run_a / "metrics.json").write_text(
+            '{"task_success": true, "steps_taken": 3, "total_tokens": 80, '
+            '"elapsed_seconds": 1.2, "tool_call_count": 2, "retrieval_queries": 0, '
+            '"retrieval_match_count": 0, "patch_attempts": 1, "patch_successes": 1, '
+            '"verify_task_calls": 1, "targeted_test_calls": 0, "broad_verification_rejections": 0}',
+            encoding="utf-8",
+        )
+        (run_a / "result.json").write_text(
+            '{"task_id":"run-a","summary":"ok","failure_type":null,"failure_stage":null,"failure_message":null}',
+            encoding="utf-8",
+        )
+        (run_a / "run_manifest.json").write_text(
+            '{"mechanisms":{"mechanism_profile":"full"}}',
+            encoding="utf-8",
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["benchmark", "ablation-report", "--dir", str(artifact_root), "--markdown-out", str(report_path)],
+        )
+        assert result.exit_code == 0, result.output
+        text = report_path.read_text(encoding="utf-8")
+        assert "Verify Task" in text
+        assert "Broad Rejections" in text
+        assert "| full |" in text
 
     def test_benchmark_compare_outputs_delta(self, tmp_path):
         left_root = tmp_path / "left"

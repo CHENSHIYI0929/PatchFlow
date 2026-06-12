@@ -688,6 +688,32 @@ class TestArtifactExport:
                     metadata={"risk_level": "high", "findings": ["Patch modifies a test file"]},
                 ),
             )
+            log.log_action(
+                step=2,
+                action=Action(
+                    ActionType.TOOL_CALL,
+                    "Run task verification.",
+                    ToolCall("verify_task", {}),
+                ),
+            )
+            log.log_action(
+                step=3,
+                action=Action(
+                    ActionType.TOOL_CALL,
+                    "Run targeted test.",
+                    ToolCall("test", {"path": "test_demo.py::test_build"}),
+                ),
+            )
+            log.log_observation(
+                step=4,
+                observation=Observation(
+                    status=ObservationStatus.ERROR,
+                    output="[BENCHMARK VERIFY GUARD] Broad pytest verification is disabled.",
+                    tool_name="test",
+                    error="Broad benchmark verification is blocked; use verify_task instead.",
+                    metadata={"verification_scope_rejected": True},
+                ),
+            )
             log.log_task_failed(steps=1, reason="failed")
 
         result = RunResult(
@@ -710,6 +736,9 @@ class TestArtifactExport:
         assert metrics["failure_analyses"] == 1
         assert metrics["edit_plans"] == 1
         assert metrics["patch_review_failures"] == 1
+        assert metrics["verify_task_calls"] == 1
+        assert metrics["targeted_test_calls"] == 1
+        assert metrics["broad_verification_rejections"] == 1
 
     def test_final_report_handles_empty_patch_metadata(self, sample_task, tmp_log_dir):
         with EventLog.create(sample_task, log_dir=str(tmp_log_dir)) as log:
