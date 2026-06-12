@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import os
 import json
+import subprocess
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -595,6 +597,76 @@ class TestCliBenchmark:
         artifact_root = tmp_path / "logs" / "artifacts"
         assert artifact_root.exists()
 
+    def test_benchmark_run_accepts_workspace_root(self, tmp_path):
+        tasks_dir = tmp_path / "tasks"
+        tasks_dir.mkdir()
+        source_repo = tmp_path / "demo_repo"
+        source_repo.mkdir()
+        workspace_root = tmp_path / "outside_workspaces"
+        (tasks_dir / "task-a.txt").write_text(
+            "---\nrepo: demo_repo\n---\nFix task A",
+            encoding="utf-8",
+        )
+        captured_runs = []
+
+        def fake_execute_run(config, repo_path, description, **kwargs):
+            captured_runs.append(str(repo_path))
+            class _Result:
+                status = type("_S", (), {"value": "success"})()
+                steps_taken = 1
+                total_tokens = 1
+                error = None
+                def is_success(self):
+                    return True
+            return _Result(), tmp_path / "logs" / "artifacts" / "fake"
+
+        runner = CliRunner()
+        with patch("entry.cli.load_config") as mock_cfg:
+            with patch("entry.cli._execute_run", side_effect=fake_execute_run):
+                from config.schema import AppConfig
+                cfg = AppConfig()
+                cfg.agent.log_dir = str(tmp_path / "logs")
+                mock_cfg.return_value = cfg
+                result = runner.invoke(
+                    cli,
+                    [
+                        "benchmark", "run",
+                        "--repo", str(tmp_path),
+                        "--tasks-dir", str(tasks_dir),
+                        "--workspace-root", str(workspace_root),
+                    ],
+                    obj={},
+                )
+
+        assert result.exit_code == 0, result.output
+        assert captured_runs
+        assert Path(captured_runs[0]).parent == workspace_root.resolve()
+        assert "Workspace:" in result.output
+
+    def test_prepare_clean_workspace_creates_isolated_git_repo(self, tmp_path):
+        from agent.benchmark import prepare_clean_workspace
+
+        source = tmp_path / "source"
+        source.mkdir()
+        (source / "demo.py").write_text("x = 1\n", encoding="utf-8")
+        workspace = prepare_clean_workspace(
+            source,
+            workspace_root=tmp_path / "outside_workspaces",
+            task_name="task-a",
+        )
+
+        assert (workspace / ".git").exists()
+        (workspace / "demo.py").write_text("x = 2\n", encoding="utf-8")
+        diff = subprocess.run(
+            ["git", "diff", "HEAD"],
+            cwd=workspace,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        assert "demo.py" in diff
+        assert "source" not in diff
+
     def test_benchmark_task_front_matter_is_respected(self, tmp_path):
         tasks_dir = tmp_path / "tasks"
         tasks_dir.mkdir()
@@ -667,7 +739,8 @@ class TestCliBenchmark:
                 "max_steps": 7,
             }
         ]
-        assert "logs/workspaces/task-a_" in captured_runs[0]["repo_path"]
+        assert Path(captured_runs[0]["repo_path"]).name.startswith("task-a_")
+        assert str(tmp_path / "logs") not in captured_runs[0]["repo_path"]
         assert captured_runs[0]["manifest"]["workspace_repo"] == captured_runs[0]["repo_path"]
         assert captured_runs[0]["manifest"]["repo_source"] == str(tmp_path.resolve())
         assert captured_runs[0]["manifest"]["run_started_at"] is None
@@ -815,7 +888,8 @@ class TestCliBenchmark:
                 "test_cmd": "python -m pytest test_demo.py --tb=short --no-header -q",
             }
         ]
-        assert "logs/workspaces/task-a_" in execute_calls[0]["repo_path"]
+        assert Path(execute_calls[0]["repo_path"]).name.startswith("task-a_")
+        assert str(tmp_path / "logs") not in execute_calls[0]["repo_path"]
 
     def test_benchmark_reset_fixtures_restores_baseline(self, tmp_path):
         fixtures_root = tmp_path / "benchmark_fixtures"
@@ -903,6 +977,50 @@ class TestCliBenchmark:
         assert artifact_dirs
         payload = (artifact_dirs[0] / "result.json").read_text(encoding="utf-8")
         assert '"failure_type": "workspace_error"' in payload
+
+    def test_benchmark_run_skips_task_after_timeout(self, tmp_path):
+        tasks_dir = tmp_path / "tasks"
+        tasks_dir.mkdir()
+        scoped_repo = tmp_path / "demo_repo"
+        scoped_repo.mkdir()
+        (tasks_dir / "task-a.txt").write_text(
+            "---\nrepo: demo_repo\n---\nFix task A",
+            encoding="utf-8",
+        )
+
+        runner = CliRunner()
+
+        def fake_execute_run(*args, **kwargs):
+            time.sleep(2.0)
+            raise AssertionError("timeout wrapper should interrupt before this point")
+
+        with patch("entry.cli.load_config") as mock_cfg:
+            with patch("entry.cli._execute_run", side_effect=fake_execute_run):
+                from config.schema import AppConfig
+                cfg = AppConfig()
+                cfg.agent.log_dir = str(tmp_path / "logs")
+                mock_cfg.return_value = cfg
+                result = runner.invoke(
+                    cli,
+                    [
+                        "benchmark", "run",
+                        "--repo", str(tmp_path),
+                        "--tasks-dir", str(tasks_dir),
+                        "--task-timeout-seconds", "1",
+                    ],
+                    obj={},
+                )
+
+        assert result.exit_code == 0, result.output
+        artifact_root = tmp_path / "logs" / "artifacts"
+        artifact_dirs = [p for p in artifact_root.iterdir() if p.is_dir()]
+        assert artifact_dirs
+        result_payload = (artifact_dirs[0] / "result.json").read_text(encoding="utf-8")
+        manifest_payload = (artifact_dirs[0] / "run_manifest.json").read_text(encoding="utf-8")
+        assert "0/1 succeeded" in result.output
+        assert '"failure_type": "timeout"' in result_payload
+        assert '"failure_stage": "agent_loop"' in result_payload
+        assert '"task_timeout_seconds": 1' in manifest_payload
 
 
 class TestBenchmarkTaskSpecs:

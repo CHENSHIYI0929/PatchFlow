@@ -57,6 +57,8 @@ from tools.base import ToolRegistry, ToolResult
 
 logger = logging.getLogger(__name__)
 
+GIT_WRITE_TOOLS = {"git_add", "git_commit"}
+
 
 # ---------------------------------------------------------------------------
 # 配置
@@ -359,6 +361,27 @@ class Agent:
                         patch=self._get_git_diff(task.repo_path),
                     )
 
+                if self._should_auto_finish_after_patch_verification(
+                    task,
+                    tool_call=tc,
+                    observation=observation,
+                    edits_made=edits_made,
+                    log=log,
+                ):
+                    summary = (
+                        "Target verification passed after edits; benchmark run auto-finished "
+                        "without waiting for another model response."
+                    )
+                    log.log_task_complete(steps=step, summary=summary)
+                    return RunResult(
+                        task_id=task.task_id,
+                        status=RunStatus.SUCCESS,
+                        summary=summary,
+                        steps_taken=step,
+                        total_tokens=total_tokens,
+                        patch=self._get_git_diff(task.repo_path),
+                    )
+
                 # ── 6. Reflection 触发判断 ──────────────────────────────
 
                 # 触发条件 A：测试工具失败
@@ -542,6 +565,17 @@ class Agent:
         if tc is None:
             return ToolResult(success=False, output="", error="Missing tool call.", failure_type="tool_failure")
 
+        self._maybe_default_benchmark_test_cwd(task, tc)
+        guarded = self._maybe_guard_test_scope(task, tc)
+        if guarded is not None:
+            return guarded
+        shell_git_guarded = self._maybe_guard_shell_git_scope(task, tc)
+        if shell_git_guarded is not None:
+            return shell_git_guarded
+        git_guarded = self._maybe_guard_git_write(tc)
+        if git_guarded is not None:
+            return git_guarded
+
         plan = None
         if tc.name in WRITE_TOOLS:
             plan = parse_or_infer_edit_plan(
@@ -586,6 +620,120 @@ class Agent:
             if result.metadata is None:
                 result.metadata = {}
             result.metadata.setdefault("edit_plan", plan.to_dict())
+        return result
+
+    def _maybe_default_benchmark_test_cwd(self, task: Task, tc: ToolCall) -> None:
+        if self._cfg.run_mode != "benchmark" or tc.name not in self._cfg.test_tool_names:
+            return
+        params = dict(tc.params or {})
+        if params.get("cwd"):
+            return
+        params["cwd"] = task.repo_path
+        params["benchmark_default_cwd"] = True
+        tc.params = params
+
+    def _maybe_guard_git_write(self, tc: ToolCall) -> ToolResult | None:
+        if self._cfg.run_mode != "benchmark" or tc.name not in GIT_WRITE_TOOLS:
+            return None
+        return ToolResult(
+            success=True,
+            output=(
+                "[BENCHMARK GUARD] Skipped git write operation in benchmark mode. "
+                "Benchmark runs should modify only their copied workspace and export artifacts."
+            ),
+            metadata={"benchmark_git_write_guard": True, "original_tool": tc.name},
+        )
+
+    def _maybe_guard_shell_git_scope(self, task: Task, tc: ToolCall) -> ToolResult | None:
+        if self._cfg.run_mode != "benchmark" or tc.name != "shell":
+            return None
+        cmd = str((tc.params or {}).get("cmd", "")).strip()
+        if not re.search(r"\bgit\s+(diff|status)\b", cmd):
+            return None
+        guarded_cmd = None
+        if re.search(r"\bgit\s+diff\b", cmd):
+            guarded_cmd = "git diff -- ."
+            if "--cached" in cmd or "--staged" in cmd:
+                guarded_cmd = "git diff --cached -- ."
+        elif re.search(r"\bgit\s+status\b", cmd):
+            guarded_cmd = "git status --short --branch -- ."
+        if guarded_cmd is None:
+            return None
+
+        cwd = str((tc.params or {}).get("cwd") or task.repo_path)
+        result = self._registry.execute_tool(
+            "shell",
+            {"cmd": guarded_cmd, "cwd": cwd, "timeout": 30},
+        )
+        if result.metadata is None:
+            result.metadata = {}
+        result.metadata.update({
+            "shell_git_scope_guard": True,
+            "original_tool": tc.name,
+            "original_cmd": cmd,
+            "guarded_cmd": guarded_cmd,
+            "cwd": cwd,
+        })
+        prefix = (
+            "[GIT SCOPE GUARD] Replaced shell git inspection with a workspace-scoped "
+            f"command: {guarded_cmd}\n"
+        )
+        result.output = prefix + (result.output or "")
+        return result
+
+    def _maybe_guard_test_scope(self, task: Task, tc: ToolCall) -> ToolResult | None:
+        if self._cfg.run_mode != "benchmark" or not task.test_cmd:
+            return None
+        if "::" not in task.test_cmd:
+            return None
+        if tc.name in self._cfg.test_tool_names and self._is_broad_test_tool_call(tc, task):
+            return self._run_guarded_target_verification(task, original_tool=tc.name)
+        if tc.name == "shell" and self._is_broad_pytest_shell_call(tc, task):
+            return self._run_guarded_target_verification(task, original_tool=tc.name)
+        return None
+
+    def _is_broad_test_tool_call(self, tc: ToolCall, task: Task) -> bool:
+        params = tc.params or {}
+        path = str(params.get("path", "")).strip()
+        if not path or path in {".", "tests", "tests/", "test"}:
+            return True
+        if "::" in path:
+            return False
+        try:
+            resolved = Path(path).resolve()
+            repo = Path(task.repo_path).resolve()
+            if resolved == repo or resolved.is_dir():
+                return True
+        except Exception:
+            pass
+        return path.endswith(".py") or path.endswith("/")
+
+    def _is_broad_pytest_shell_call(self, tc: ToolCall, task: Task) -> bool:
+        cmd = str((tc.params or {}).get("cmd", "")).strip()
+        if "pytest" not in cmd:
+            return False
+        if task.test_cmd.strip() and task.test_cmd.strip() in cmd:
+            return False
+        return "::" not in cmd
+
+    def _run_guarded_target_verification(self, task: Task, *, original_tool: str) -> ToolResult:
+        result = self._registry.execute_tool(
+            "shell",
+            {"cmd": task.test_cmd, "cwd": task.repo_path, "timeout": 120},
+        )
+        if result.metadata is None:
+            result.metadata = {}
+        result.metadata.update({
+            "verification_scope_guard": True,
+            "original_tool": original_tool,
+            "verification_cmd": task.test_cmd,
+            "cwd": task.repo_path,
+        })
+        prefix = (
+            "[SCOPE GUARD] Replaced a broad pytest run with the task's targeted "
+            f"verification command: {task.test_cmd}\n"
+        )
+        result.output = prefix + (result.output or "")
         return result
 
     def _confirm_review_patch(self, tool_name: str, params: dict) -> bool:
@@ -845,11 +993,21 @@ class Agent:
         raise last_exc  # type: ignore[misc]
 
     def _get_git_diff(self, repo_path: str) -> str | None:
-        """抓取 git diff HEAD 作为 patch，失败时静默返回 None。"""
+        """抓取当前 repo/workspace 的 git diff，避免父仓库脏状态污染子工作区。"""
         import subprocess
         try:
+            root_proc = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                capture_output=True, text=True, timeout=10, cwd=repo_path,
+            )
+            args = ["git", "diff", "HEAD"]
+            if root_proc.returncode == 0:
+                git_root = Path(root_proc.stdout.strip()).resolve()
+                workspace = Path(repo_path).resolve()
+                if git_root != workspace:
+                    args.extend(["--", "."])
             proc = subprocess.run(
-                ["git", "diff", "HEAD"],
+                args,
                 capture_output=True, text=True, timeout=10, cwd=repo_path,
             )
             diff = proc.stdout.strip()
@@ -880,17 +1038,45 @@ class Agent:
             return False
         return self._matches_verification_target(task, tool_call)
 
-    def _matches_verification_target(self, task: Task, tool_call: ToolCall) -> bool:
+    def _should_auto_finish_after_patch_verification(
+        self,
+        task: Task,
+        tool_call: ToolCall,
+        observation: Observation,
+        edits_made: bool,
+        log: EventLog,
+    ) -> bool:
+        if self._cfg.run_mode != "benchmark" or not edits_made:
+            return False
+        if not task.finish_if_verified or not observation.is_success():
+            return False
+        if self._latest_high_risk_patch_review(log):
+            return False
+        return self._matches_verification_target(task, tool_call, observation)
+
+    def _matches_verification_target(
+        self,
+        task: Task,
+        tool_call: ToolCall,
+        observation: Observation | None = None,
+    ) -> bool:
         if not task.test_cmd:
             return False
+        metadata = observation.metadata if observation and observation.metadata else {}
+        verification_cmd = str(metadata.get("verification_cmd", "")).strip()
+        if verification_cmd and verification_cmd == task.test_cmd.strip():
+            return True
         params = tool_call.params or {}
         path = str(params.get("path", "")).strip()
         cwd = str(params.get("cwd", "")).strip()
+        cmd = str(params.get("cmd", "")).strip()
         test_cmd = task.test_cmd
 
         if path and path in test_cmd:
             return True
         if cwd and cwd in test_cmd:
+            return True
+        if cmd and test_cmd in cmd:
             return True
         if not path and not cwd:
             return False

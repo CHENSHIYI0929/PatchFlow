@@ -15,7 +15,7 @@ import pytest
 
 from agent.core import Agent, AgentConfig
 from agent.event_log import EventLog
-from agent.task import Action, ActionType, RunStatus, Task, ToolCall
+from agent.task import Action, ActionType, EventType, RunStatus, Task, ToolCall
 from llm.base import LLMMessage, LLMResponse, LLMToolSchema, MockBackend
 from tools.base import NoopTool, ToolRegistry
 
@@ -428,10 +428,16 @@ class TestIntegration:
         with EventLog.create(task, log_dir=str(tmp_path / "logs")) as log:
             result = agent.run(task, log)
             stats = summarize_run(log)
+            reflection_reasons = [
+                event.payload["reason"]
+                for event in log.replay()
+                if event.event_type == EventType.REFLECTION
+            ]
 
         assert result.is_success()
         assert stats["actions"] == 3
-        assert stats["reflections"] == 1      # 测试失败触发一次
+        assert stats["reflections"] >= 1
+        assert "test_failed" in reflection_reasons
         assert stats["tool_calls"]["test"] == 1
         assert stats["tool_calls"]["shell"] == 1
         assert stats["final_status"] == "task_complete"

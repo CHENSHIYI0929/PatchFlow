@@ -16,6 +16,7 @@ Git 操作工具，四个 action：
 
 from __future__ import annotations
 
+from pathlib import Path
 import subprocess
 from typing import Any
 
@@ -43,6 +44,23 @@ def _run_git(
     result = rt.exec(cmd, cwd=cwd, timeout=30)
     output = result.output.strip()
     return result.success, output
+
+
+def _is_nested_git_worktree(cwd: str | None) -> bool:
+    """Return True when cwd is inside, but not equal to, the discovered git root."""
+    if not cwd:
+        return False
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return proc.returncode == 0 and Path(proc.stdout.strip()).resolve() != Path(cwd).resolve()
+    except Exception:
+        return False
 
 
 class GitStatusTool(BaseTool):
@@ -84,7 +102,10 @@ class GitStatusTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         cwd = params.get("cwd")
-        success, output = _run_git(["status", "--short", "--branch"], cwd=cwd, runtime=self._runtime)
+        args = ["status", "--short", "--branch"]
+        if _is_nested_git_worktree(cwd):
+            args += ["--", "."]
+        success, output = _run_git(args, cwd=cwd, runtime=self._runtime)
         if not output:
             output = "Nothing to commit, working tree clean"
         return ToolResult(success=success, output=output, error=None if success else output)
@@ -148,6 +169,8 @@ class GitDiffTool(BaseTool):
             args.append("--cached")
         if path:
             args += ["--", path]
+        elif _is_nested_git_worktree(cwd):
+            args += ["--", "."]
 
         success, output = _run_git(args, cwd=cwd, runtime=self._runtime)
 

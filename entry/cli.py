@@ -24,7 +24,10 @@ from __future__ import annotations
 
 import logging
 import json
+import multiprocessing
+import queue
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -39,7 +42,9 @@ if str(_ROOT) not in sys.path:
 from config.schema import load_config, merge_cli_overrides  # noqa: E402
 from llm.router import create_backend_from_config           # noqa: E402
 from agent.failure import (  # noqa: E402
+    FAILURE_STAGE_AGENT_LOOP,
     FAILURE_STAGE_PREVERIFY,
+    FAILURE_TYPE_TIMEOUT,
     FAILURE_TYPE_WORKSPACE_ERROR,
     failure,
 )
@@ -59,6 +64,62 @@ def cyan(t: str) -> str:   return _c(t, "36")
 def bold(t: str) -> str:   return _c(t, "1")
 def dim(t: str) -> str:    return _c(t, "2")
 def magenta(t: str) -> str: return _c(t, "35")
+
+
+class TaskTimeoutError(TimeoutError):
+    """Raised when a benchmark task exceeds its wall-clock timeout."""
+
+
+def _benchmark_run_worker(result_queue, payload: dict) -> None:
+    """Run a single benchmark task in a child process."""
+    try:
+        result, artifact_dir = _execute_run(**payload)
+        result_queue.put({
+            "ok": True,
+            "result": result,
+            "artifact_dir": artifact_dir,
+        })
+    except BaseException as exc:  # pragma: no cover - exercised through parent process
+        result_queue.put({
+            "ok": False,
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+        })
+
+
+def _execute_run_with_task_timeout(seconds: int | None, payload: dict):
+    """Execute one benchmark task, using a worker process when a hard timeout is configured."""
+    if not seconds or seconds <= 0:
+        return _execute_run(**payload)
+
+    try:
+        ctx = multiprocessing.get_context("fork")
+    except ValueError:  # pragma: no cover - platform fallback
+        ctx = multiprocessing.get_context()
+    result_queue = ctx.Queue(maxsize=1)
+    process = ctx.Process(target=_benchmark_run_worker, args=(result_queue, payload))
+    process.start()
+    process.join(seconds)
+
+    if process.is_alive():
+        process.terminate()
+        process.join(5)
+        if process.is_alive() and hasattr(process, "kill"):
+            process.kill()
+            process.join(1)
+        raise TaskTimeoutError(f"Timed out after {seconds}s")
+
+    try:
+        message = result_queue.get_nowait()
+    except queue.Empty as exc:
+        raise RuntimeError(f"Benchmark worker exited without a result (exitcode={process.exitcode})") from exc
+    finally:
+        result_queue.close()
+        result_queue.join_thread()
+
+    if message.get("ok"):
+        return message["result"], message["artifact_dir"]
+    raise RuntimeError(f"{message.get('error_type')}: {message.get('error')}")
 
 
 # ---------------------------------------------------------------------------
@@ -850,6 +911,8 @@ def benchmark_ablation_report(
 @click.option("--tasks-dir", required=True, help="Directory containing task .txt files")
 @click.option("--task-glob", default="*.txt", show_default=True, help="Glob used to select task files")
 @click.option("--limit", default=None, type=int, help="Only run the first N matching task files")
+@click.option("--task-timeout-seconds", default=None, type=int, help="Skip a task if it runs longer than this many wall-clock seconds")
+@click.option("--workspace-root", default=None, help="Directory used for per-task clean benchmark workspaces")
 @click.option("--model", "-m", default=None, help="Override LLM model name")
 @click.option("--provider", "-p", default=None, help="Override LLM provider")
 @click.option("--max-steps", default=None, type=int, help="Override max steps")
@@ -872,6 +935,8 @@ def benchmark_run(
     tasks_dir: str,
     task_glob: str,
     limit: int | None,
+    task_timeout_seconds: int | None,
+    workspace_root: str | None,
     model: str | None,
     provider: str | None,
     max_steps: int | None,
@@ -945,15 +1010,19 @@ def benchmark_run(
         click.echo(red(f"Error: no task files found in {tasks_root} matching {task_glob!r}"), err=True)
         sys.exit(1)
 
+    success_count = 0
+    workspace_root_path = (
+        Path(workspace_root).expanduser().resolve()
+        if workspace_root
+        else Path(tempfile.gettempdir()).resolve() / "patchflow-workspaces" / repo_path.name
+    )
     click.echo(bold(f"\n🏁 Benchmark Run"))
     click.echo(f"  Provider : {config.llm.provider}")
     click.echo(f"  Model    : {config.llm.model}")
     click.echo(f"  Repo     : {repo_path}")
     click.echo(f"  Tasks    : {len(task_files)}")
-    click.echo(f"  Source   : {tasks_root}\n")
-
-    success_count = 0
-    workspace_root = Path(config.agent.log_dir).resolve() / "workspaces"
+    click.echo(f"  Source   : {tasks_root}")
+    click.echo(f"  Workspace: {workspace_root_path}\n")
     for index, task_file in enumerate(task_files, start=1):
         spec = load_task_spec(task_file)
         source_task_repo = resolve_task_repo(repo_path, spec)
@@ -970,7 +1039,7 @@ def benchmark_run(
         try:
             task_repo = prepare_clean_workspace(
                 source_task_repo,
-                workspace_root=workspace_root,
+                workspace_root=workspace_root_path,
                 task_name=task_file.stem,
             )
         except Exception as exc:
@@ -990,6 +1059,8 @@ def benchmark_run(
                 sandbox=sandbox,
             )
             manifest["mechanisms"] = mechanisms
+            if task_timeout_seconds is not None:
+                manifest["agent_config"]["task_timeout_seconds"] = task_timeout_seconds
             manifest["task_metadata"] = {
                 "category": spec.category,
                 "difficulty": spec.difficulty,
@@ -1018,6 +1089,8 @@ def benchmark_run(
             sandbox=sandbox,
         )
         manifest["mechanisms"] = mechanisms
+        if task_timeout_seconds is not None:
+            manifest["agent_config"]["task_timeout_seconds"] = task_timeout_seconds
         manifest["task_metadata"] = {
             "category": spec.category,
             "difficulty": spec.difficulty,
@@ -1077,31 +1150,49 @@ def benchmark_run(
             continue
 
         try:
-            result, _artifact_dir = _execute_run(
-                run_config,
-                task_repo,
-                spec.description,
-                task_file=str(task_file),
-                source_repo_path=str(source_task_repo),
-                manifest=manifest,
-                test_cmd=default_test_cmd_for_spec(spec),
-                exclude_paths=spec.exclude_paths,
-                target_files=spec.target_files,
-                finish_if_verified=spec.finish_if_verified,
-                grader=grader,
-                stream=stream,
-                confirm=confirm,
-                sandbox=sandbox,
-                verbose=verbose,
-                show_banner=False,
-                run_mode="benchmark",
-                disable_failure_analyzer=disable_failure_analyzer,
-                disable_hybrid_retrieval=disable_hybrid_retrieval,
-                disable_edit_plan=disable_edit_plan,
-                disable_self_review=disable_self_review,
-                disable_long_memory=disable_long_memory,
-                disable_compression=disable_compression,
+            result, _artifact_dir = _execute_run_with_task_timeout(
+                task_timeout_seconds,
+                {
+                    "config": run_config,
+                    "repo_path": task_repo,
+                    "description": spec.description,
+                    "task_file": str(task_file),
+                    "source_repo_path": str(source_task_repo),
+                    "manifest": manifest,
+                    "test_cmd": default_test_cmd_for_spec(spec),
+                    "exclude_paths": spec.exclude_paths,
+                    "target_files": spec.target_files,
+                    "finish_if_verified": spec.finish_if_verified,
+                    "grader": grader,
+                    "stream": stream,
+                    "confirm": confirm,
+                    "sandbox": sandbox,
+                    "verbose": verbose,
+                    "show_banner": False,
+                    "run_mode": "benchmark",
+                    "disable_failure_analyzer": disable_failure_analyzer,
+                    "disable_hybrid_retrieval": disable_hybrid_retrieval,
+                    "disable_edit_plan": disable_edit_plan,
+                    "disable_self_review": disable_self_review,
+                    "disable_long_memory": disable_long_memory,
+                    "disable_compression": disable_compression,
+                },
             )
+        except TaskTimeoutError as exc:
+            failure_info = failure(
+                str(exc),
+                failure_type=FAILURE_TYPE_TIMEOUT,
+                failure_stage=FAILURE_STAGE_AGENT_LOOP,
+            )
+            result, artifact_dir = export_failed_benchmark_artifact(
+                spec=spec,
+                repo_path=task_repo,
+                log_dir=run_config.agent.log_dir,
+                manifest=manifest,
+                failure=failure_info,
+            )
+            click.echo(red(f"  Timeout    : {exc}"))
+            click.echo(f"  Artifacts  : {artifact_dir}\n")
         except Exception as exc:
             failure_info = failure(
                 f"Run failed before completion: {exc}",

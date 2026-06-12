@@ -7,6 +7,7 @@ Edit plan parsing and validation for patch actions.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -48,7 +49,9 @@ def parse_or_infer_edit_plan(
     default_test_cmd: str | None = None,
 ) -> EditPlan:
     explicit = _parse_explicit_plan(thought)
-    if explicit:
+    if explicit and explicit.valid:
+        return explicit
+    if explicit and not _can_infer_from_params(params):
         return explicit
 
     path = params.get("path")
@@ -62,7 +65,7 @@ def parse_or_infer_edit_plan(
         expected_behavior="The requested task should pass its targeted verification.",
         risk_level=risk,
         tests_to_run=[default_test_cmd] if default_test_cmd else [],
-        source="inferred",
+        source="inferred_after_invalid" if explicit else "inferred",
     )
 
 
@@ -102,9 +105,7 @@ def _parse_explicit_plan(thought: str) -> EditPlan | None:
     marker = "EDIT_PLAN:"
     if marker not in thought:
         return None
-    raw = thought.split(marker, 1)[1].strip()
-    if "\n" in raw:
-        raw = raw.splitlines()[0].strip()
+    raw = _extract_json_after_marker(thought, marker)
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
@@ -124,3 +125,38 @@ def _parse_explicit_plan(thought: str) -> EditPlan | None:
         tests_to_run=[str(item) for item in data.get("tests_to_run", [])],
         source="model",
     )
+
+
+def _can_infer_from_params(params: dict[str, Any]) -> bool:
+    return bool(params.get("path"))
+
+
+def _extract_json_after_marker(thought: str, marker: str) -> str:
+    raw = thought.split(marker, 1)[1].strip()
+    raw = raw.lstrip("*").strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
+        raw = raw.split("```", 1)[0].strip()
+    if raw.startswith("{"):
+        depth = 0
+        in_string = False
+        escaped = False
+        for idx, char in enumerate(raw):
+            if escaped:
+                escaped = False
+                continue
+            if char == "\\":
+                escaped = True
+                continue
+            if char == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return raw[: idx + 1]
+    return raw.splitlines()[0].strip() if "\n" in raw else raw

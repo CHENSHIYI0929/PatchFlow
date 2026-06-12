@@ -11,6 +11,7 @@ import hashlib
 import os
 import platform
 import shutil
+import subprocess
 import time
 import uuid
 from dataclasses import dataclass
@@ -208,9 +209,30 @@ def prepare_clean_workspace(
     shutil.copytree(
         source,
         workspace,
-        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache", "logs", "artifacts"),
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache", ".git", "logs", "artifacts"),
     )
+    _initialize_workspace_git(workspace)
     return workspace
+
+
+def _initialize_workspace_git(workspace: Path) -> None:
+    """Create an isolated git baseline so workspace diff/status never falls through to a parent repo."""
+    commands = [
+        ["git", "init"],
+        ["git", "config", "user.email", "benchmark@example.invalid"],
+        ["git", "config", "user.name", "PatchFlow Benchmark"],
+        ["git", "add", "."],
+        ["git", "commit", "--allow-empty", "-m", "benchmark baseline"],
+    ]
+    for cmd in commands:
+        subprocess.run(
+            cmd,
+            cwd=workspace,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
 
 
 def export_failed_benchmark_artifact(

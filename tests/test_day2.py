@@ -15,6 +15,8 @@ tests/test_day2.py
 - ToolRegistry 基本功能
 """
 
+import subprocess
+
 import pytest
 
 from agent.core import Agent, AgentConfig
@@ -408,7 +410,7 @@ class TestReflectionTestFailed:
         events = log.replay()
         reflection_events = [e for e in events if e.event_type == EventType.REFLECTION]
         assert len(reflection_events) >= 1
-        assert reflection_events[0].payload["reason"] == "test_failed"
+        assert any(e.payload["reason"] == "test_failed" for e in reflection_events)
         log.close()
 
     def test_reflection_injected_into_history(self, tmp_path):
@@ -551,6 +553,341 @@ class TestFinishVerification:
             if e.event_type.value == "observation" and e.payload["observation"]["tool_name"] == "apply_patch"
         ][0]
         assert patch_obs["metadata"]["edit_plan"]["change_intent"] == "update x"
+
+    def test_markdown_edit_plan_is_parsed_for_patch(self, tmp_path):
+        task = Task(task_id="planmd", description="edit demo", repo_path=str(tmp_path), max_steps=3)
+        target = tmp_path / "demo.py"
+        target.write_text("x = 1\n", encoding="utf-8")
+        log = EventLog.create(task, log_dir=str(tmp_path / "logs"))
+        registry = ToolRegistry()
+        registry.register(ApplyPatchTool())
+        script = [
+            make_tool_call_action(
+                "apply_patch",
+                {
+                    "patch_type": "search_replace",
+                    "path": str(target),
+                    "search": "x = 1",
+                    "replace": "x = 2",
+                },
+                thought='**EDIT_PLAN:**\n```json\n{"target_files":["demo.py"],"change_intent":"update x","expected_behavior":"x changes","risk_level":"low","tests_to_run":[]}\n```',
+            ),
+            make_finish_action("done"),
+        ]
+        backend = MockBackend(script)
+        agent = Agent(backend, registry)
+
+        result = agent.run(task, log)
+
+        assert result.is_success()
+        patch_obs = [
+            e.payload["observation"] for e in log.replay()
+            if e.event_type.value == "observation" and e.payload["observation"]["tool_name"] == "apply_patch"
+        ][0]
+        assert patch_obs["metadata"]["edit_plan"]["source"] == "model"
+        assert patch_obs["metadata"]["edit_plan"]["change_intent"] == "update x"
+
+    def test_invalid_edit_plan_falls_back_to_patch_path(self, tmp_path):
+        task = Task(task_id="planfallback", description="edit demo", repo_path=str(tmp_path), max_steps=3)
+        target = tmp_path / "demo.py"
+        target.write_text("x = 1\n", encoding="utf-8")
+        log = EventLog.create(task, log_dir=str(tmp_path / "logs"))
+        registry = ToolRegistry()
+        registry.register(ApplyPatchTool())
+        script = [
+            make_tool_call_action(
+                "apply_patch",
+                {
+                    "patch_type": "search_replace",
+                    "path": str(target),
+                    "search": "x = 1",
+                    "replace": "x = 2",
+                },
+                thought="EDIT_PLAN: this is not json",
+            ),
+            make_finish_action("done"),
+        ]
+        backend = MockBackend(script)
+        agent = Agent(backend, registry)
+
+        result = agent.run(task, log)
+
+        assert result.is_success()
+        assert target.read_text(encoding="utf-8") == "x = 2\n"
+        patch_obs = [
+            e.payload["observation"] for e in log.replay()
+            if e.event_type.value == "observation" and e.payload["observation"]["tool_name"] == "apply_patch"
+        ][0]
+        assert patch_obs["metadata"]["edit_plan"]["source"] == "inferred_after_invalid"
+
+    def test_benchmark_scope_guard_replaces_broad_pytest_with_target(self, tmp_path):
+        task = Task(
+            task_id="scopeguard",
+            description="fix one test",
+            repo_path=str(tmp_path),
+            test_cmd="python -m pytest test_demo.py::test_target -q",
+            max_steps=3,
+        )
+        log = EventLog.create(task, log_dir=str(tmp_path / "logs"))
+        registry = ToolRegistry()
+        registry.register(NoopTool("shell", output="1 passed in 0.01s"))
+        script = [
+            make_tool_call_action(
+                "shell",
+                {"cmd": "python -m pytest test_demo.py -q", "cwd": str(tmp_path)},
+                thought="Run the full file.",
+            ),
+            make_finish_action("done"),
+        ]
+        backend = MockBackend(script)
+        agent = Agent(backend, registry, AgentConfig(run_mode="benchmark"))
+
+        result = agent.run(task, log)
+
+        assert result.is_success()
+        shell_obs = [
+            e.payload["observation"] for e in log.replay()
+            if e.event_type.value == "observation" and e.payload["observation"]["tool_name"] == "shell"
+        ][0]
+        assert shell_obs["metadata"]["verification_scope_guard"] is True
+        assert "test_demo.py::test_target" in shell_obs["output"]
+
+    def test_benchmark_scope_guard_replaces_directory_test_path_with_target(self, tmp_path):
+        task = Task(
+            task_id="scopeguarddir",
+            description="fix one test",
+            repo_path=str(tmp_path),
+            test_cmd="python -m pytest test_demo.py::test_target -q",
+            max_steps=3,
+        )
+        log = EventLog.create(task, log_dir=str(tmp_path / "logs"))
+        registry = ToolRegistry()
+        registry.register(NoopTool("shell", output="1 passed in 0.01s"))
+        registry.register(FailingTool("test", "full suite should not run"))
+        script = [
+            make_tool_call_action(
+                "test",
+                {"path": str(tmp_path)},
+                thought="Run all tests in the workspace.",
+            ),
+            make_finish_action("done"),
+        ]
+        backend = MockBackend(script)
+        agent = Agent(backend, registry, AgentConfig(run_mode="benchmark"))
+
+        result = agent.run(task, log)
+
+        assert result.is_success()
+        test_obs = [
+            e.payload["observation"] for e in log.replay()
+            if e.event_type.value == "observation" and e.payload["observation"]["tool_name"] == "test"
+        ][0]
+        assert test_obs["metadata"]["verification_scope_guard"] is True
+        assert "test_demo.py::test_target" in test_obs["output"]
+
+    def test_benchmark_mode_skips_git_write_tools(self, tmp_path):
+        task = Task(
+            task_id="gitguard",
+            description="fix one test",
+            repo_path=str(tmp_path),
+            max_steps=3,
+        )
+        log = EventLog.create(task, log_dir=str(tmp_path / "logs"))
+        registry = ToolRegistry()
+        registry.register(FailingTool("git_add", "git add should not run"))
+        script = [
+            make_tool_call_action("git_add", {"paths": ["."]}, thought="Stage changes."),
+            make_finish_action("done"),
+        ]
+        backend = MockBackend(script)
+        agent = Agent(backend, registry, AgentConfig(run_mode="benchmark"))
+
+        result = agent.run(task, log)
+
+        assert result.is_success()
+        git_obs = [
+            e.payload["observation"] for e in log.replay()
+            if e.event_type.value == "observation" and e.payload["observation"]["tool_name"] == "git_add"
+        ][0]
+        assert git_obs["metadata"]["benchmark_git_write_guard"] is True
+        assert "Skipped git write operation" in git_obs["output"]
+
+    def test_benchmark_shell_git_diff_is_workspace_scoped(self, tmp_path):
+        task = Task(
+            task_id="shellgitguard",
+            description="inspect diff",
+            repo_path=str(tmp_path),
+            max_steps=3,
+        )
+        log = EventLog.create(task, log_dir=str(tmp_path / "logs"))
+        registry = ToolRegistry()
+        registry.register(NoopTool("shell", output="No unstaged changes."))
+        script = [
+            make_tool_call_action(
+                "shell",
+                {"cmd": "cd /parent/repo/logs/workspaces/case1 && git diff"},
+                thought="Inspect diff.",
+            ),
+            make_finish_action("done"),
+        ]
+        backend = MockBackend(script)
+        agent = Agent(backend, registry, AgentConfig(run_mode="benchmark"))
+
+        result = agent.run(task, log)
+
+        assert result.is_success()
+        shell_obs = [
+            e.payload["observation"] for e in log.replay()
+            if e.event_type.value == "observation" and e.payload["observation"]["tool_name"] == "shell"
+        ][0]
+        assert shell_obs["metadata"]["shell_git_scope_guard"] is True
+        assert shell_obs["metadata"]["guarded_cmd"] == "git diff -- ."
+        assert "GIT SCOPE GUARD" in shell_obs["output"]
+
+    def test_benchmark_test_tool_defaults_to_task_repo_cwd(self, tmp_path):
+        task = Task(
+            task_id="testcwd",
+            description="run targeted test",
+            repo_path=str(tmp_path),
+            test_cmd="python -m pytest test_demo.py::test_target -q",
+            max_steps=3,
+        )
+        log = EventLog.create(task, log_dir=str(tmp_path / "logs"))
+        registry = ToolRegistry()
+        registry.register(NoopTool("test", output="1 passed"))
+        script = [
+            make_tool_call_action(
+                "test",
+                {"path": "test_demo.py::test_target"},
+                thought="Run targeted test.",
+            ),
+            make_finish_action("done"),
+        ]
+        backend = MockBackend(script)
+        agent = Agent(backend, registry, AgentConfig(run_mode="benchmark"))
+
+        result = agent.run(task, log)
+
+        assert result.is_success()
+        assert script[0].tool_call.params["cwd"] == str(tmp_path)
+        assert script[0].tool_call.params["benchmark_default_cwd"] is True
+
+    def test_benchmark_auto_finishes_after_patch_and_target_verification(self, tmp_path):
+        target = tmp_path / "demo.py"
+        target.write_text("x = 1\n", encoding="utf-8")
+        task = Task(
+            task_id="autofinish",
+            description="fix x",
+            repo_path=str(tmp_path),
+            test_cmd="python -m pytest test_demo.py::test_x -q",
+            finish_if_verified=True,
+            max_steps=5,
+        )
+        log = EventLog.create(task, log_dir=str(tmp_path / "logs"))
+        registry = ToolRegistry()
+        registry.register(ApplyPatchTool())
+        registry.register(NoopTool("test", output="1 passed"))
+        script = [
+            make_tool_call_action(
+                "apply_patch",
+                {
+                    "patch_type": "search_replace",
+                    "path": str(target),
+                    "search": "x = 1",
+                    "replace": "x = 2",
+                },
+                thought='EDIT_PLAN: {"target_files":["demo.py"],"change_intent":"update x","expected_behavior":"test passes","risk_level":"low","tests_to_run":["python -m pytest test_demo.py::test_x -q"]}',
+            ),
+            make_tool_call_action(
+                "test",
+                {"path": "test_demo.py::test_x"},
+                thought="Verify targeted test.",
+            ),
+            make_give_up_action("Model stopped with no content"),
+        ]
+        backend = MockBackend(script)
+        agent = Agent(backend, registry, AgentConfig(run_mode="benchmark"))
+
+        result = agent.run(task, log)
+
+        assert result.is_success()
+        assert result.steps_taken == 2
+        assert "auto-finished" in result.summary
+
+    def test_auto_finish_after_patch_is_benchmark_only(self, tmp_path):
+        target = tmp_path / "demo.py"
+        target.write_text("x = 1\n", encoding="utf-8")
+        task = Task(
+            task_id="noautofinish",
+            description="fix x",
+            repo_path=str(tmp_path),
+            test_cmd="python -m pytest test_demo.py::test_x -q",
+            finish_if_verified=True,
+            max_steps=5,
+        )
+        log = EventLog.create(task, log_dir=str(tmp_path / "logs"))
+        registry = ToolRegistry()
+        registry.register(ApplyPatchTool())
+        registry.register(NoopTool("test", output="1 passed"))
+        script = [
+            make_tool_call_action(
+                "apply_patch",
+                {
+                    "patch_type": "search_replace",
+                    "path": str(target),
+                    "search": "x = 1",
+                    "replace": "x = 2",
+                },
+                thought='EDIT_PLAN: {"target_files":["demo.py"],"change_intent":"update x","expected_behavior":"test passes","risk_level":"low","tests_to_run":["python -m pytest test_demo.py::test_x -q"]}',
+            ),
+            make_tool_call_action(
+                "test",
+                {"path": "test_demo.py::test_x", "cwd": str(tmp_path)},
+                thought="Verify targeted test.",
+            ),
+            make_give_up_action("still not done"),
+        ]
+        backend = MockBackend(script)
+        agent = Agent(backend, registry, AgentConfig(run_mode="auto"))
+
+        result = agent.run(task, log)
+
+        assert result.status == RunStatus.GAVE_UP
+        assert result.summary == "still not done"
+
+    def test_finish_diff_does_not_include_dirty_parent_repo(self, tmp_path):
+        parent = tmp_path / "repo"
+        parent.mkdir()
+        workspace = parent / "logs" / "workspaces" / "case1"
+        workspace.mkdir(parents=True)
+        tracked = parent / "tracked.py"
+        tracked.write_text("value = 1\n", encoding="utf-8")
+        (workspace / "demo.py").write_text("demo = 1\n", encoding="utf-8")
+        subprocess.run(["git", "init"], cwd=parent, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "add", "tracked.py"], cwd=parent, check=True, capture_output=True, text=True)
+        subprocess.run(
+            ["git", "commit", "-m", "init"],
+            cwd=parent,
+            check=True,
+            capture_output=True,
+            text=True,
+            env={
+                "GIT_AUTHOR_NAME": "Test",
+                "GIT_AUTHOR_EMAIL": "test@example.com",
+                "GIT_COMMITTER_NAME": "Test",
+                "GIT_COMMITTER_EMAIL": "test@example.com",
+            },
+        )
+        tracked.write_text("value = 2\n", encoding="utf-8")
+
+        task = Task(task_id="diffscope", description="finish", repo_path=str(workspace), max_steps=1)
+        log = EventLog.create(task, log_dir=str(tmp_path / "logs"))
+        agent = Agent(MockBackend([make_finish_action("done")]), ToolRegistry())
+
+        result = agent.run(task, log)
+
+        assert result.is_success()
+        assert result.patch is None or "tracked.py" not in result.patch
 
     def test_safe_mode_blocks_patch_before_write(self, tmp_path):
         task = Task(task_id="safe1", description="do not write", repo_path=str(tmp_path), max_steps=2)

@@ -541,6 +541,7 @@ class TestArtifactExport:
         artifact_dir = export_run_artifacts(log, result, elapsed_seconds=1.23)
 
         assert (artifact_dir / "events.json").exists()
+        assert (artifact_dir / "events.jsonl").exists()
         assert (artifact_dir / "metrics.json").exists()
         assert (artifact_dir / "result.json").exists()
         assert (artifact_dir / "retrievals.json").exists()
@@ -549,6 +550,9 @@ class TestArtifactExport:
         assert (artifact_dir / "final_report.md").exists()
 
         metrics = json.loads((artifact_dir / "metrics.json").read_text())
+        events = json.loads((artifact_dir / "events.json").read_text())
+        event_lines = (artifact_dir / "events.jsonl").read_text().splitlines()
+        assert len(event_lines) == len(events)
         assert metrics["task_success"] is True
         assert metrics["retrieval_queries"] >= 2
         assert metrics["graph_queries"] == 1
@@ -706,3 +710,37 @@ class TestArtifactExport:
         assert metrics["failure_analyses"] == 1
         assert metrics["edit_plans"] == 1
         assert metrics["patch_review_failures"] == 1
+
+    def test_final_report_handles_empty_patch_metadata(self, sample_task, tmp_log_dir):
+        with EventLog.create(sample_task, log_dir=str(tmp_log_dir)) as log:
+            log.log_task_start(sample_task)
+            log.log_observation(
+                step=1,
+                observation=Observation(
+                    status=ObservationStatus.ERROR,
+                    output="",
+                    tool_name="apply_patch",
+                    error="EDIT_PLAN validation failed",
+                    metadata={
+                        "patch": None,
+                        "edit_plan": {
+                            "target_files": [],
+                            "risk_level": "medium",
+                            "change_intent": "",
+                        },
+                    },
+                ),
+            )
+            log.log_task_failed(steps=1, reason="failed")
+
+        result = RunResult(
+            task_id=sample_task.task_id,
+            status=RunStatus.FAILED,
+            summary="failed",
+            steps_taken=1,
+            total_tokens=5,
+        )
+
+        artifact_dir = export_run_artifacts(log, result, elapsed_seconds=0.5)
+
+        assert (artifact_dir / "final_report.md").exists()

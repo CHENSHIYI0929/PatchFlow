@@ -651,6 +651,20 @@ class TestGitStatusTool:
         assert result.success
         assert "f.py" in result.output
 
+    def test_nested_workspace_does_not_show_parent_status(self, git_repo):
+        f = git_repo / "f.py"
+        f.write_text("x = 1\n")
+        subprocess.run(["git", "add", "."], cwd=git_repo, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=git_repo, capture_output=True)
+        f.write_text("x = 2\n")
+        workspace = git_repo / "logs" / "workspaces" / "case1"
+        workspace.mkdir(parents=True)
+
+        result = self.tool.execute({"cwd": str(workspace)})
+
+        assert result.success
+        assert "f.py" not in result.output
+
 
 # ===========================================================================
 # GitDiffTool
@@ -683,6 +697,20 @@ class TestGitDiffTool:
         result = self.tool.execute({"cwd": str(git_repo)})
         assert result.success
         assert "No" in result.output
+
+    def test_nested_workspace_does_not_show_parent_diff(self, git_repo):
+        f = git_repo / "f.py"
+        f.write_text("x = 1\n")
+        subprocess.run(["git", "add", "."], cwd=git_repo, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=git_repo, capture_output=True)
+        f.write_text("x = 2\n")
+        workspace = git_repo / "logs" / "workspaces" / "case1"
+        workspace.mkdir(parents=True)
+
+        result = self.tool.execute({"cwd": str(workspace)})
+
+        assert result.success
+        assert "f.py" not in result.output
 
 
 # ===========================================================================

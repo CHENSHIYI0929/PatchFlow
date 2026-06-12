@@ -67,6 +67,10 @@ def export_run_artifacts(
         metrics["patch_success_rate"] = 0.0
 
     _write_json(artifact_dir / "events.json", events)
+    (artifact_dir / "events.jsonl").write_text(
+        "".join(json.dumps(event, ensure_ascii=False) + "\n" for event in events),
+        encoding="utf-8",
+    )
     _write_json(artifact_dir / "metrics.json", metrics)
     _write_json(artifact_dir / "result.json", result.to_dict())
     _write_json(artifact_dir / "retrievals.json", retrievals)
@@ -241,8 +245,16 @@ def _render_final_report(
     patches: list[dict[str, Any]],
     events: list[dict[str, Any]],
 ) -> str:
+    def _patch_dict(item: dict[str, Any]) -> dict[str, Any]:
+        patch = item.get("patch")
+        return patch if isinstance(patch, dict) else {}
+
+    def _edit_plan_dict(item: dict[str, Any]) -> dict[str, Any]:
+        plan = item.get("edit_plan")
+        return plan if isinstance(plan, dict) else {}
+
     modified = [
-        item.get("patch", {}).get("path")
+        _patch_dict(item).get("path")
         for item in patches
         if item.get("tool_name") in {"apply_patch", "file_write"} and item.get("patch")
     ]
@@ -286,7 +298,7 @@ def _render_final_report(
         "## Edit Plans",
         "",
         *[
-            f"- {item.get('patch', {}).get('path')}: risk={item.get('edit_plan', {}).get('risk_level')} intent={item.get('edit_plan', {}).get('change_intent')}"
+            f"- {_patch_dict(item).get('path')}: risk={_edit_plan_dict(item).get('risk_level')} intent={_edit_plan_dict(item).get('change_intent')}"
             for item in patches
             if item.get("edit_plan")
         ],
