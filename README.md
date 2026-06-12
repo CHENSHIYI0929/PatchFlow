@@ -108,6 +108,7 @@ Markdown benchmark report 现在会输出固定模板：总成功率、任务数
 如果你想把某次结构化 patch 或它的 reverse patch 重放到仓库里，可以使用 `benchmark patch-replay`。
 
 V2 增强默认开启：failure analyzer 会解析 pytest/traceback/tool failure，hybrid retrieval 会综合 traceback files、target files、symbol/keyword 命中给出候选文件，写操作会记录 `EDIT_PLAN`，patch 后会做增强 self-review。每次 run 现在还会导出 `final_report.md`，包含修改文件、检索候选、edit plan、review 结果、测试结果和回滚方式。
+benchmark 模式还会暴露受控的 `verify_task` 验证入口：模型修完后优先调用它运行任务自己的 grader / `test_cmd`，避免把验证范围扩大到整份测试文件。通用 pytest 调用仍可用于目标测试，但 broad pytest 会被 benchmark guard 拦截并提示改用 `verify_task`。
 
 运行模式：
 - `--run-mode safe`：只分析和计划，不真正改文件
@@ -123,6 +124,12 @@ V2 增强默认开启：failure analyzer 会解析 pytest/traceback/tool failure
 - `--disable-compression`
 
 benchmark 现在内置 `v2_*.txt` 分层任务，共 30 个，覆盖 `bugfix`、`edge_case`、`import_api`、`test_driven`、`refactor_safe`、`config_cli`。`--mechanism-profile baseline|partial|full` 可用于跑 baseline、部分机制和完整机制，`benchmark ablation-report` 会生成机制消融报告。
+
+当前 V2 smoke benchmark（DeepSeek-V4-Flash，`v2_*.txt --limit 15 --task-timeout-seconds 300`）结果：
+- `baseline`: `14/15`，主要失败为长尾 timeout
+- `partial`: `13/15`，成功样本更快，但尾部稳定性较弱
+- `full`: `15/15`
+- 加入 `verify_task` 后的最新 `full`: `15/15`，平均 steps 从 `5.80` 降到 `4.47`，平均 tokens 从 `47,265` 降到 `32,022`，平均耗时从 `96.44s` 降到 `53.83s`，broad 无效验证尝试从 `2/15` 降到 `0/15`
 
 agent 自身也会把 coding 能力相关的信号写入 artifacts 和 benchmark summary：
 - `finish_verification_attempts` / `finish_verification_failures`：模型喊 FINISH 后是否又被目标测试拉回修改循环

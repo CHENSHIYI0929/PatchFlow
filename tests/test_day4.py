@@ -141,6 +141,16 @@ class TestBuildTaskPrompt:
         assert "report.py" in prompt
         assert "scores.py" in prompt
 
+    def test_includes_benchmark_verification_rules_in_benchmark_mode(self):
+        prompt = build_task_prompt(
+            "Fix X",
+            "/repo",
+            test_cmd="python -m pytest test_demo.py::test_x -q",
+            run_mode="benchmark",
+        )
+        assert "Benchmark Verification Rules" in prompt
+        assert "verify_task" in prompt
+
 
 class TestReflectionPrompts:
     def test_test_failed_prompt(self):

@@ -620,7 +620,7 @@ class TestFinishVerification:
         ][0]
         assert patch_obs["metadata"]["edit_plan"]["source"] == "inferred_after_invalid"
 
-    def test_benchmark_scope_guard_replaces_broad_pytest_with_target(self, tmp_path):
+    def test_benchmark_verify_task_runs_target_verification(self, tmp_path):
         task = Task(
             task_id="scopeguard",
             description="fix one test",
@@ -633,9 +633,9 @@ class TestFinishVerification:
         registry.register(NoopTool("shell", output="1 passed in 0.01s"))
         script = [
             make_tool_call_action(
-                "shell",
-                {"cmd": "python -m pytest test_demo.py -q", "cwd": str(tmp_path)},
-                thought="Run the full file.",
+                "verify_task",
+                {},
+                thought="Run the benchmark verification.",
             ),
             make_finish_action("done"),
         ]
@@ -645,14 +645,15 @@ class TestFinishVerification:
         result = agent.run(task, log)
 
         assert result.is_success()
-        shell_obs = [
+        verify_obs = [
             e.payload["observation"] for e in log.replay()
-            if e.event_type.value == "observation" and e.payload["observation"]["tool_name"] == "shell"
+            if e.event_type.value == "observation" and e.payload["observation"]["tool_name"] == "verify_task"
         ][0]
-        assert shell_obs["metadata"]["verification_scope_guard"] is True
-        assert "test_demo.py::test_target" in shell_obs["output"]
+        assert verify_obs["metadata"]["verification_scope_guard"] is True
+        assert verify_obs["metadata"]["benchmark_verify_tool"] is True
+        assert "test_demo.py::test_target" in verify_obs["output"]
 
-    def test_benchmark_scope_guard_replaces_directory_test_path_with_target(self, tmp_path):
+    def test_benchmark_scope_guard_blocks_broad_test_tool_calls(self, tmp_path):
         task = Task(
             task_id="scopeguarddir",
             description="fix one test",
@@ -670,6 +671,7 @@ class TestFinishVerification:
                 {"path": str(tmp_path)},
                 thought="Run all tests in the workspace.",
             ),
+            make_tool_call_action("verify_task", {}, thought="Use the benchmark verification tool instead."),
             make_finish_action("done"),
         ]
         backend = MockBackend(script)
@@ -683,7 +685,8 @@ class TestFinishVerification:
             if e.event_type.value == "observation" and e.payload["observation"]["tool_name"] == "test"
         ][0]
         assert test_obs["metadata"]["verification_scope_guard"] is True
-        assert "test_demo.py::test_target" in test_obs["output"]
+        assert test_obs["metadata"]["verification_scope_rejected"] is True
+        assert "use verify_task" in test_obs["error"].lower()
 
     def test_benchmark_mode_skips_git_write_tools(self, tmp_path):
         task = Task(

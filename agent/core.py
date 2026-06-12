@@ -170,6 +170,7 @@ class Agent:
                     test_cmd=task.test_cmd,
                     exclude_paths=task.exclude_paths,
                     target_files=task.target_files,
+                    run_mode=self._cfg.run_mode,
                 ),
             ))
         self._inject_long_memory(task, log, history)
@@ -202,7 +203,7 @@ class Agent:
                 )
                 logged_compressed_count = history.compressed_message_count
             messages = self._build_messages(history, token_budget, repo_map)
-            tools = self._registry.get_schemas()
+            tools = self._available_tools(task)
 
             try:
                 response = self._call_with_retry(messages, tools)
@@ -565,6 +566,9 @@ class Agent:
         if tc is None:
             return ToolResult(success=False, output="", error="Missing tool call.", failure_type="tool_failure")
 
+        verify_task_result = self._maybe_run_benchmark_verify_task(task, tc)
+        if verify_task_result is not None:
+            return verify_task_result
         self._maybe_default_benchmark_test_cwd(task, tc)
         guarded = self._maybe_guard_test_scope(task, tc)
         if guarded is not None:
@@ -681,15 +685,49 @@ class Agent:
         result.output = prefix + (result.output or "")
         return result
 
+    def _available_tools(self, task: Task) -> list[LLMToolSchema]:
+        tools = self._registry.get_schemas()
+        if self._cfg.run_mode != "benchmark" or not task.test_cmd:
+            return tools
+        tools.append(
+            LLMToolSchema(
+                name="verify_task",
+                description=(
+                    "Run the benchmark task's configured verification command in the task workspace. "
+                    "Use this instead of broad pytest or shell test commands in benchmark mode."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                },
+            )
+        )
+        return tools
+
+    def _maybe_run_benchmark_verify_task(self, task: Task, tc: ToolCall) -> ToolResult | None:
+        if tc.name != "verify_task":
+            return None
+        if self._cfg.run_mode != "benchmark" or not task.test_cmd:
+            return ToolResult(
+                success=False,
+                output="",
+                error="verify_task is only available for benchmark tasks with configured verification.",
+                failure_type="tool_failure",
+            )
+        result = self._run_guarded_target_verification(task, original_tool="verify_task")
+        if result.metadata is None:
+            result.metadata = {}
+        result.metadata["benchmark_verify_tool"] = True
+        return result
+
     def _maybe_guard_test_scope(self, task: Task, tc: ToolCall) -> ToolResult | None:
         if self._cfg.run_mode != "benchmark" or not task.test_cmd:
             return None
-        if "::" not in task.test_cmd:
-            return None
         if tc.name in self._cfg.test_tool_names and self._is_broad_test_tool_call(tc, task):
-            return self._run_guarded_target_verification(task, original_tool=tc.name)
+            return self._reject_broad_verification(task, tc, reason="broad_test_tool")
         if tc.name == "shell" and self._is_broad_pytest_shell_call(tc, task):
-            return self._run_guarded_target_verification(task, original_tool=tc.name)
+            return self._reject_broad_verification(task, tc, reason="broad_pytest_shell")
         return None
 
     def _is_broad_test_tool_call(self, tc: ToolCall, task: Task) -> bool:
@@ -735,6 +773,24 @@ class Agent:
         )
         result.output = prefix + (result.output or "")
         return result
+
+    def _reject_broad_verification(self, task: Task, tc: ToolCall, *, reason: str) -> ToolResult:
+        return ToolResult(
+            success=False,
+            output=(
+                "[BENCHMARK VERIFY GUARD] Broad pytest verification is disabled in benchmark mode.\n"
+                "Use the `verify_task` tool to run the task's configured verification command."
+            ),
+            error="Broad benchmark verification is blocked; use verify_task instead.",
+            metadata={
+                "verification_scope_guard": True,
+                "verification_scope_rejected": True,
+                "verification_cmd": task.test_cmd,
+                "original_tool": tc.name,
+                "guard_reason": reason,
+            },
+            failure_type="tool_failure",
+        )
 
     def _confirm_review_patch(self, tool_name: str, params: dict) -> bool:
         callback = self._cfg.confirm_callback

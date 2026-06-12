@@ -189,6 +189,7 @@ Please fix the following issue in the repository at {repo_path}.
 {verification_section}
 {exclude_section}
 {targets_section}
+{benchmark_verification_section}
 ## Instructions
 - Start by exploring the repository to understand the codebase
 - Prefer verifying the task with the targeted test command first when one is provided
@@ -224,6 +225,13 @@ These files are especially likely to matter for this task:
 {target_files}
 """
 
+_BENCHMARK_VERIFICATION_SECTION_TEMPLATE = """
+## Benchmark Verification Rules
+- In benchmark mode, use the `verify_task` tool for verification once you have a candidate fix
+- Do not run broader pytest commands or full test files on your own
+- The configured task verification is the success criterion for this run
+"""
+
 
 def build_task_prompt(
     description: str,
@@ -232,6 +240,7 @@ def build_task_prompt(
     test_cmd: str | None = None,
     exclude_paths: list[str] | None = None,
     target_files: list[str] | None = None,
+    run_mode: str = "auto",
 ) -> str:
     """
     构建任务描述的用户消息（对话的第一条 user 消息）。
@@ -257,6 +266,9 @@ def build_task_prompt(
         targets_section = _TARGET_FILES_SECTION_TEMPLATE.format(
             target_files="\n".join(f"- {path}" for path in target_files)
         )
+    benchmark_verification_section = ""
+    if run_mode == "benchmark" and test_cmd:
+        benchmark_verification_section = _BENCHMARK_VERIFICATION_SECTION_TEMPLATE
 
     return _TASK_TEMPLATE.format(
         repo_path=repo_path,
@@ -265,4 +277,5 @@ def build_task_prompt(
         verification_section=verification_section,
         exclude_section=exclude_section,
         targets_section=targets_section,
+        benchmark_verification_section=benchmark_verification_section,
     )

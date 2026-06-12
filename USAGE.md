@@ -509,6 +509,7 @@ agent benchmark run --repo . --tasks-dir ./benchmark_tasks
 agent benchmark run --repo . --tasks-dir ./benchmark_tasks --task-glob "*.txt" --limit 2
 agent benchmark run --repo . --tasks-dir ./benchmark_tasks --task-glob "v2_*.txt" --mechanism-profile baseline
 agent benchmark run --repo . --tasks-dir ./benchmark_tasks --task-glob "v2_*.txt" --mechanism-profile full
+agent benchmark run --repo . --tasks-dir ./benchmark_tasks --task-glob "v2_*.txt" --limit 15 --mechanism-profile full --task-timeout-seconds 300
 agent benchmark ablation-report --dir ./logs/artifacts --markdown-out ./ablation_report.md
 agent patch latest --artifact-dir ./logs/artifacts/<run_id>
 agent patch rollback --artifact-dir ./logs/artifacts/<run_id> --repo .
@@ -518,6 +519,7 @@ agent benchmark reset-fixtures --repo .
 
 如果任务文件带 front matter，`benchmark run` 还会自动使用任务自己的 `repo`、`test_path`、`test_cmd`、`lint_cmd`、`patch_policy_cmd`、`exclude_paths`、`target_files`、`max_steps` 和 `finish_if_verified` 设置。`test_cmd` 会被封装成 `CommandGrader`；如果再声明 `lint_cmd` 或 `patch_policy_cmd`，则会自动组合成 `CompositeGrader`。
 每个任务每次运行前都会先复制到独立 workspace，再在 workspace 里跑 agent 和 grader。artifact 里的 `run_manifest.json` 会记录 `repo_source`、`workspace_repo`、模型配置、代码版本、任务文件 hash 和运行环境。仓库里推荐把任务和示例仓库统一放在 `benchmark_fixtures/` 下，方便 benchmark、试玩和恢复基线共用一套目录。
+设置 `--task-timeout-seconds` 后，每个 benchmark task 会放进独立 worker 子进程里执行；父进程负责硬超时终止并导出 timeout artifact，避免远端模型 API 或工具调用阻塞整批实验。
 默认的 `--skip-preverified` 会在进入 LLM 前先跑目标验证；如果任务已经是通过状态，就直接记成一次成功的 benchmark 工件，`steps=0`、`tokens=0`。
 如果你想排除这些预检直接通过的样本，在 `summarize` 或 `compare` 时加 `--only-agent-runs`。如果 benchmark 把 fixture 改脏了，可以用 `benchmark reset-fixtures` 恢复到未修复初始态。
 新的 benchmark 汇总还会显示 `graph_queries`、`patch_conflicts`、`patch_reverts`、`finish_verification_failures`、`self_review_failures`、`taxonomy_recovery_prompts`、`auto_symbol_probes`、`failure_analyses`、`edit_plans`、`patch_review_failures`、`first_pass_success_rate`、`failure_type_distribution` 和 `failure_stage_distribution`。每条 run 也会输出 `failure_type`、`failure_stage`、`failure_message`，方便区分是 agent、grading、workspace 还是模型层出了问题。
@@ -551,6 +553,7 @@ V2 默认机制：
 - hybrid retrieval：综合失败分析、target files、关键词和符号命中，生成候选文件及 reasons。
 - edit plan：写操作前记录 `EDIT_PLAN`，包含 target files、修改意图、预期行为、风险和测试命令。
 - patch self-review：检查冲突标记、debug hook、测试文件修改、exclude paths、过大 patch。
+- benchmark verify_task：benchmark 模式下的受控验证入口，只运行任务配置的 grader / `test_cmd`，避免模型扩大到整份测试文件。
 - final report：每次 run 导出 `final_report.md`。
 
 V2 benchmark 包含 30 个 `v2_*.txt` 分层任务，覆盖 `bugfix`、`edge_case`、`import_api`、`test_driven`、`refactor_safe`、`config_cli`。可以这样跑消融：
@@ -561,6 +564,26 @@ agent benchmark run --repo . --tasks-dir ./benchmark_tasks --task-glob "v2_*.txt
 agent benchmark run --repo . --tasks-dir ./benchmark_tasks --task-glob "v2_*.txt" --mechanism-profile full
 agent benchmark ablation-report --dir ./logs/artifacts --markdown-out ./ablation_report.md
 ```
+
+推荐复现口径是固定题量和单题硬超时：
+
+```bash
+agent benchmark run --repo . --tasks-dir ./benchmark_tasks --task-glob "v2_*.txt" --limit 15 --mechanism-profile baseline --task-timeout-seconds 300
+agent benchmark run --repo . --tasks-dir ./benchmark_tasks --task-glob "v2_*.txt" --limit 15 --mechanism-profile partial --task-timeout-seconds 300
+agent benchmark run --repo . --tasks-dir ./benchmark_tasks --task-glob "v2_*.txt" --limit 15 --mechanism-profile full --task-timeout-seconds 300
+agent benchmark ablation-report --dir ./logs/artifacts --markdown-out ./ablation_report.md
+```
+
+当前 V2 参考结果（DeepSeek-V4-Flash，前 15 个 `v2_*.txt` 任务，单题 `300s`）：
+
+| profile | success | avg steps | avg tokens | avg time |
+| --- | ---: | ---: | ---: | ---: |
+| baseline | 14/15 | 4.80 | 38,860 | 105.99s |
+| partial | 13/15 | 4.47 | 34,181 | 55.64s |
+| full | 15/15 | 5.80 | 47,265 | 96.44s |
+| full + verify_task | 15/15 | 4.47 | 32,022 | 53.83s |
+
+这组数据的读法是：`partial` 在成功样本上更轻，但更容易在少数任务上进入 timeout；`full` 通过 failure analyzer、hybrid retrieval、edit plan、patch self-review、long memory、context compression 和 auto-finish 形成闭环，当前样本达到 `15/15`。加入 `verify_task` 后，模型更少做 broad pytest 验证，broad 无效验证尝试从 `2/15` 降到 `0/15`。
 
 ### 长记忆与上下文压缩
 
