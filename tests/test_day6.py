@@ -421,13 +421,16 @@ class TestCliBenchmark:
 
     def test_benchmark_summarize_writes_markdown_report(self, tmp_path):
         artifact_root = tmp_path / "logs" / "artifacts"
+        memory_dir = tmp_path / "logs" / "memory"
         run_a = artifact_root / "run-a"
         report_path = tmp_path / "summary.md"
         run_a.mkdir(parents=True)
+        memory_dir.mkdir(parents=True)
         (run_a / "metrics.json").write_text(
             '{"task_success": true, "steps_taken": 4, "total_tokens": 100, '
             '"elapsed_seconds": 1.5, "tool_call_count": 3, "retrieval_queries": 1, '
             '"retrieval_match_count": 2, "patch_attempts": 1, "patch_successes": 1, '
+            '"memory_hit_count": 3, "experience_memory_hits": 1, '
             '"verify_task_calls": 2, "targeted_test_calls": 1, "broad_verification_rejections": 0}',
             encoding="utf-8",
         )
@@ -437,6 +440,18 @@ class TestCliBenchmark:
         )
         (run_a / "run_manifest.json").write_text(
             '{"repo_source":"/tmp/source","workspace_repo":"/tmp/workspace"}',
+            encoding="utf-8",
+        )
+        (memory_dir / "experience_memory.jsonl").write_text(
+            json.dumps(
+                {
+                    "memory_kind": "experience",
+                    "task_category": "bugfix",
+                    "expected_failure_type": "verification_failed",
+                    "lessons": ["Prefer targeted verification first: pytest tests/test_demo.py -q"],
+                },
+                ensure_ascii=False,
+            ) + "\n",
             encoding="utf-8",
         )
 
@@ -453,6 +468,9 @@ class TestCliBenchmark:
         assert "Workspace Repo" in text
         assert "Verify task calls" in text
         assert "| Verify task calls | 2 |" in text
+        assert "Experience Memory Summary" in text
+        assert "| Experience memory hits | 1 |" in text
+        assert "Prefer targeted verification first" in text
 
     def test_benchmark_ablation_report_includes_verification_metrics(self, tmp_path):
         artifact_root = tmp_path / "logs" / "artifacts"
@@ -463,6 +481,7 @@ class TestCliBenchmark:
             '{"task_success": true, "steps_taken": 3, "total_tokens": 80, '
             '"elapsed_seconds": 1.2, "tool_call_count": 2, "retrieval_queries": 0, '
             '"retrieval_match_count": 0, "patch_attempts": 1, "patch_successes": 1, '
+            '"memory_hit_count": 2, "experience_memory_hits": 1, '
             '"verify_task_calls": 1, "targeted_test_calls": 0, "broad_verification_rejections": 0}',
             encoding="utf-8",
         )
@@ -484,6 +503,8 @@ class TestCliBenchmark:
         text = report_path.read_text(encoding="utf-8")
         assert "Verify Task" in text
         assert "Broad Rejections" in text
+        assert "Memory Hits" in text
+        assert "Experience Hits" in text
         assert "| full |" in text
 
     def test_benchmark_compare_outputs_delta(self, tmp_path):

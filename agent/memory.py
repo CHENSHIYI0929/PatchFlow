@@ -98,6 +98,32 @@ def load_experience_memories(log_dir: str | Path, *, limit: int = 50) -> list[di
     return rows[-limit:]
 
 
+def summarize_experience_memories(log_dir: str | Path, *, limit: int = 500) -> dict[str, Any]:
+    rows = load_experience_memories(log_dir, limit=limit)
+    by_category: dict[str, int] = {}
+    by_failure_type: dict[str, int] = {}
+    top_lessons: dict[str, int] = {}
+    for row in rows:
+        category = str(row.get("task_category") or "unknown")
+        by_category[category] = by_category.get(category, 0) + 1
+        failure_type = str(row.get("expected_failure_type") or "unknown")
+        by_failure_type[failure_type] = by_failure_type.get(failure_type, 0) + 1
+        for lesson in row.get("lessons") or []:
+            text = str(lesson).strip()
+            if not text:
+                continue
+            top_lessons[text] = top_lessons.get(text, 0) + 1
+    return {
+        "experience_count": len(rows),
+        "by_category": by_category,
+        "by_failure_type": by_failure_type,
+        "top_lessons": [
+            {"lesson": lesson, "count": count}
+            for lesson, count in sorted(top_lessons.items(), key=lambda item: (-item[1], item[0]))[:5]
+        ],
+    }
+
+
 def search_memories(
     log_dir: str | Path,
     *,

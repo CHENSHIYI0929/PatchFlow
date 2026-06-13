@@ -22,7 +22,7 @@ from agent.artifacts import _collect_capability_stats, export_run_artifacts
 from agent.event_log import EventLog
 from agent.failure import FailureInfo
 from agent.grader import CommandGrader, CompositeGrader, Grader
-from agent.memory import append_run_memory
+from agent.memory import append_run_memory, summarize_experience_memories
 from agent.task import Observation, ObservationStatus, RunResult, RunStatus, Task
 from tools.runtime import LocalRuntime, Runtime
 
@@ -436,6 +436,7 @@ def _summarize_run_pairs(
     summary = {
         "artifact_root": str(Path(root)),
         "include_preverified": include_preverified,
+        "experience_memory": _load_experience_summary(root),
         "run_count": len(runs),
         "success_count": 0,
         "success_rate": 0.0,
@@ -458,6 +459,8 @@ def _summarize_run_pairs(
         "taxonomy_recovery_prompts": 0,
         "auto_symbol_probes": 0,
         "long_memory_hits": 0,
+        "memory_hit_count": 0,
+        "experience_memory_hits": 0,
         "context_compressions": 0,
         "failure_analyses": 0,
         "edit_plans": 0,
@@ -487,6 +490,8 @@ def _summarize_run_pairs(
     taxonomy_recovery_prompts = sum(int(item.get("taxonomy_recovery_prompts", 0)) for item in runs)
     auto_symbol_probes = sum(int(item.get("auto_symbol_probes", 0)) for item in runs)
     long_memory_hits = sum(int(item.get("long_memory_hits", 0)) for item in runs)
+    memory_hit_count = sum(int(item.get("memory_hit_count", 0)) for item in runs)
+    experience_memory_hits = sum(int(item.get("experience_memory_hits", 0)) for item in runs)
     context_compressions = sum(int(item.get("context_compressions", 0)) for item in runs)
     failure_analyses = sum(int(item.get("failure_analyses", 0)) for item in runs)
     edit_plans = sum(int(item.get("edit_plans", 0)) for item in runs)
@@ -541,6 +546,8 @@ def _summarize_run_pairs(
             "taxonomy_recovery_prompts": taxonomy_recovery_prompts,
             "auto_symbol_probes": auto_symbol_probes,
             "long_memory_hits": long_memory_hits,
+            "memory_hit_count": memory_hit_count,
+            "experience_memory_hits": experience_memory_hits,
             "context_compressions": context_compressions,
             "failure_analyses": failure_analyses,
             "edit_plans": edit_plans,
@@ -569,6 +576,8 @@ def _summarize_run_pairs(
                     "taxonomy_recovery_prompts": int(metrics.get("taxonomy_recovery_prompts", 0)),
                     "auto_symbol_probes": int(metrics.get("auto_symbol_probes", 0)),
                     "long_memory_hits": int(metrics.get("long_memory_hits", 0)),
+                    "memory_hit_count": int(metrics.get("memory_hit_count", 0)),
+                    "experience_memory_hits": int(metrics.get("experience_memory_hits", 0)),
                     "context_compressions": int(metrics.get("context_compressions", 0)),
                     "failure_analyses": int(metrics.get("failure_analyses", 0)),
                     "edit_plans": int(metrics.get("edit_plans", 0)),
@@ -625,6 +634,8 @@ def compare_artifact_roots(
         "taxonomy_recovery_prompts",
         "auto_symbol_probes",
         "long_memory_hits",
+        "memory_hit_count",
+        "experience_memory_hits",
         "context_compressions",
         "failure_analyses",
         "edit_plans",
@@ -675,6 +686,20 @@ def summarize_by_mechanism(root: str | Path, *, include_preverified: bool = True
         "include_preverified": include_preverified,
         "groups": grouped,
     }
+
+
+def _load_experience_summary(root: str | Path) -> dict[str, Any]:
+    artifact_root = Path(root).resolve()
+    log_root = artifact_root.parent if artifact_root.name == "artifacts" else artifact_root.parent
+    memory_dir = log_root / "memory"
+    if not memory_dir.exists():
+        return {
+            "experience_count": 0,
+            "by_category": {},
+            "by_failure_type": {},
+            "top_lessons": [],
+        }
+    return summarize_experience_memories(log_root)
 
 
 def reset_benchmark_fixtures(

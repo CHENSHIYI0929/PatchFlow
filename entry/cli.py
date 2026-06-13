@@ -1523,6 +1523,8 @@ def _render_benchmark_summary_markdown(summary: dict) -> str:
             f"| Recovery prompts | {summary['taxonomy_recovery_prompts']} |",
             f"| Auto symbol probes | {summary['auto_symbol_probes']} |",
             f"| Long memory hits | {summary['long_memory_hits']} |",
+            f"| Memory hit count | {summary.get('memory_hit_count', 0)} |",
+            f"| Experience memory hits | {summary.get('experience_memory_hits', 0)} |",
             f"| Context compressions | {summary['context_compressions']} |",
             f"| Failure analyses | {summary['failure_analyses']} |",
             f"| Edit plans | {summary['edit_plans']} |",
@@ -1544,6 +1546,34 @@ def _render_benchmark_summary_markdown(summary: dict) -> str:
             "| --- | ---: |",
             *(f"| {name} | {count} |" for name, count in sorted(failure_stages.items())),
             *(["| - | 0 |"] if not failure_stages else []),
+            "",
+            "## Experience Memory Summary",
+            "",
+            f"- Experience entries: {summary.get('experience_memory', {}).get('experience_count', 0)}",
+            "",
+            "| Category | Count |",
+            "| --- | ---: |",
+            *[
+                f"| {name} | {count} |"
+                for name, count in sorted((summary.get('experience_memory', {}).get('by_category') or {}).items())
+            ],
+            *(["| - | 0 |"] if not (summary.get('experience_memory', {}).get('by_category') or {}) else []),
+            "",
+            "| Expected Failure Type | Count |",
+            "| --- | ---: |",
+            *[
+                f"| {name} | {count} |"
+                for name, count in sorted((summary.get('experience_memory', {}).get('by_failure_type') or {}).items())
+            ],
+            *(["| - | 0 |"] if not (summary.get('experience_memory', {}).get('by_failure_type') or {}) else []),
+            "",
+            "| Top Lesson | Count |",
+            "| --- | ---: |",
+            *[
+                f"| {_markdown_cell(item.get('lesson'))} | {item.get('count', 0)} |"
+                for item in (summary.get('experience_memory', {}).get('top_lessons') or [])
+            ],
+            *(["| - | 0 |"] if not (summary.get('experience_memory', {}).get('top_lessons') or []) else []),
             "",
             "## Task Results",
             "",
@@ -1578,8 +1608,8 @@ def _render_ablation_markdown(grouped: dict) -> str:
         "- Verification columns are total observed calls/rejections across each profile.",
         "- Older artifacts without these metrics are backfilled from `events.jsonl` / `events.json` when available.",
         "",
-        "| Profile | Runs | Success Rate | First-pass | Avg Steps | Avg Tools | Avg Tokens | Patch Success | Verify Task | Targeted Tests | Broad Rejections | Failure Analyses | Edit Plans | Patch Review Fails |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Profile | Runs | Success Rate | First-pass | Avg Steps | Avg Tools | Avg Tokens | Patch Success | Verify Task | Targeted Tests | Broad Rejections | Memory Hits | Experience Hits | Failure Analyses | Edit Plans | Patch Review Fails |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for name, summary in sorted(groups.items()):
         lines.append(
@@ -1588,11 +1618,12 @@ def _render_ablation_markdown(grouped: dict) -> str:
             f"{summary['avg_tool_calls']} | {summary['avg_tokens']} | "
             f"{summary['patch_success_rate']:.2%} | {summary.get('verify_task_calls', 0)} | "
             f"{summary.get('targeted_test_calls', 0)} | {summary.get('broad_verification_rejections', 0)} | "
+            f"{summary.get('memory_hit_count', 0)} | {summary.get('experience_memory_hits', 0)} | "
             f"{summary['failure_analyses']} | "
             f"{summary['edit_plans']} | {summary['patch_review_failures']} |"
         )
     if not groups:
-        lines.append("| - | 0 | 0.00% | 0.00% | 0 | 0 | 0 | 0.00% | 0 | 0 | 0 | 0 | 0 | 0 |")
+        lines.append("| - | 0 | 0.00% | 0.00% | 0 | 0 | 0 | 0.00% | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |")
     return "\n".join(lines) + "\n"
 
 
