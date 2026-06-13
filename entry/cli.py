@@ -1600,6 +1600,16 @@ def _render_benchmark_summary_markdown(summary: dict) -> str:
 
 def _render_ablation_markdown(grouped: dict) -> str:
     groups = grouped.get("groups", {})
+    top_memory_profile = None
+    if groups:
+        top_memory_profile = max(
+            groups.items(),
+            key=lambda item: (
+                int(item[1].get("experience_memory_hits", 0)),
+                int(item[1].get("memory_hit_count", 0)),
+                float(item[1].get("success_rate", 0.0)),
+            ),
+        )[0]
     lines = [
         "# Ablation Report",
         "",
@@ -1607,6 +1617,15 @@ def _render_ablation_markdown(grouped: dict) -> str:
         f"- Scope: `{'all-runs' if grouped.get('include_preverified', True) else 'agent-only'}`",
         "- Verification columns are total observed calls/rejections across each profile.",
         "- Older artifacts without these metrics are backfilled from `events.jsonl` / `events.json` when available.",
+        *(
+            [
+                f"- Highest memory reuse profile: `{top_memory_profile}` "
+                f"({groups[top_memory_profile].get('experience_memory_hits', 0)} experience hits / "
+                f"{groups[top_memory_profile].get('memory_hit_count', 0)} total memory hits)."
+            ]
+            if top_memory_profile is not None
+            else []
+        ),
         "",
         "| Profile | Runs | Success Rate | First-pass | Avg Steps | Avg Tools | Avg Tokens | Patch Success | Verify Task | Targeted Tests | Broad Rejections | Memory Hits | Experience Hits | Failure Analyses | Edit Plans | Patch Review Fails |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",

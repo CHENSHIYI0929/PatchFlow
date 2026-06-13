@@ -109,7 +109,7 @@ def summarize_experience_memories(log_dir: str | Path, *, limit: int = 500) -> d
         failure_type = str(row.get("expected_failure_type") or "unknown")
         by_failure_type[failure_type] = by_failure_type.get(failure_type, 0) + 1
         for lesson in row.get("lessons") or []:
-            text = str(lesson).strip()
+            text = _normalize_lesson(str(lesson))
             if not text:
                 continue
             top_lessons[text] = top_lessons.get(text, 0) + 1
@@ -195,7 +195,7 @@ def format_memory_hits(
             line += f" :: {_clip(summary, 180)}"
         lessons = payload.get("lessons") or []
         if lessons:
-            line += " Lessons: " + "; ".join(_clip(str(item), 120) for item in lessons[:2])
+            line += " Lessons: " + "; ".join(_clip(_normalize_lesson(str(item)), 120) for item in lessons[:2])
         lines.append(line)
     return "\n".join(lines)
 
@@ -360,7 +360,7 @@ def _summarize_success_patterns(
         if failure_type and payload.get("expected_failure_type") not in {failure_type, None}:
             continue
         for lesson in payload.get("lessons") or []:
-            text = str(lesson).strip()
+            text = _normalize_lesson(str(lesson))
             if text and text not in seen:
                 patterns.append(_clip(text, 140))
                 seen.add(text)
@@ -387,7 +387,7 @@ def _summarize_recovery_patterns(
         if failure_type and failure_type not in {observed, expected}:
             continue
         for lesson in payload.get("lessons") or []:
-            text = str(lesson).strip()
+            text = _normalize_lesson(str(lesson))
             if failure_type and failure_type not in text and observed != failure_type and expected != failure_type:
                 continue
             if text and text not in seen:
@@ -406,3 +406,15 @@ def _clip(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 3].rstrip() + "..."
+
+
+def _normalize_lesson(text: str) -> str:
+    normalized = " ".join(str(text).strip().split())
+    if not normalized:
+        return ""
+    lowered = normalized.lower()
+    if lowered.startswith("use targeted verification first:"):
+        return "Prefer targeted verification first:" + normalized.split(":", 1)[1]
+    if lowered.startswith("use targeted verification first "):
+        return normalized.replace("Use targeted verification first", "Prefer targeted verification first", 1)
+    return normalized

@@ -505,6 +505,7 @@ class TestCliBenchmark:
         assert "Broad Rejections" in text
         assert "Memory Hits" in text
         assert "Experience Hits" in text
+        assert "Highest memory reuse profile" in text
         assert "| full |" in text
 
     def test_benchmark_compare_outputs_delta(self, tmp_path):

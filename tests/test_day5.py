@@ -431,6 +431,7 @@ class TestLongMemory:
         assert "LONG MEMORY" in text
         assert "pytest tests/test_parser.py -q" in text
         assert "Successful patterns for category=bugfix" in text
+        assert "- Prefer targeted verification first: pytest tests/test_parser.py -q" in text
 
     def test_search_memories_prioritizes_matching_category_and_failure_type(self, tmp_path):
         related = Task(
