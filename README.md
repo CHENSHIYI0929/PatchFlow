@@ -132,6 +132,15 @@ benchmark 现在内置 `v2_*.txt` 分层任务，共 30 个，覆盖 `bugfix`、
 - `full`: `15/15`
 - 加入 `verify_task` 后的最新 `full`: `15/15`，平均 steps 从 `5.80` 降到 `4.47`，平均 tokens 从 `47,265` 降到 `32,022`，平均耗时从 `96.44s` 降到 `53.83s`，broad 无效验证尝试从 `2/15` 降到 `0/15`
 
+当前仓库还额外维护了一套基于 SWE-bench Lite 的 30 题阶段性结果，覆盖 `astropy`、`django`、`requests`、`sympy`、`pytest`：
+- 总计 `30` 题
+- `24` 题通过 / 修通
+- `3` 题失败
+- `3` 题属于 `evaluation-blocked`（样本口径或老版本运行时兼容问题，不直接计入正常 pass/fail）
+
+完整记录见：
+- `docs/benchmark_results_30.md`
+
 agent 自身也会把 coding 能力相关的信号写入 artifacts 和 benchmark summary：
 - `finish_verification_attempts` / `finish_verification_failures`：模型喊 FINISH 后是否又被目标测试拉回修改循环
 - `self_review_attempts` / `self_review_failures`：结束前 patch 自审是否拦截了冲突标记、debug hook 等明显风险

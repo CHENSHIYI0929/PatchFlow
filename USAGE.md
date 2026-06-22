@@ -588,6 +588,19 @@ agent benchmark ablation-report --dir ./logs/artifacts --markdown-out ./ablation
 
 这组数据的读法是：`partial` 在成功样本上更轻，但更容易在少数任务上进入 timeout；`full` 通过 failure analyzer、hybrid retrieval、edit plan、patch self-review、long memory、context compression 和 auto-finish 形成闭环，当前样本达到 `15/15`。加入 `verify_task` 后，模型更少做 broad pytest 验证，broad 无效验证尝试从 `2/15` 降到 `0/15`。
 
+另外，仓库里还维护了一份 SWE-bench Lite 的 30 题阶段性结果记录，当前覆盖 `astropy`、`django`、`requests`、`sympy`、`pytest`：
+
+- 总计 `30` 题
+- `24` 题通过 / 修通
+- `3` 题失败
+- `3` 题属于 `evaluation-blocked`
+
+完整明细见：
+
+```text
+docs/benchmark_results_30.md
+```
+
 ### 长记忆与上下文压缩
 
 默认情况下，agent 会启用两层记忆：
