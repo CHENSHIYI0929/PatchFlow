@@ -1,547 +1,105 @@
-# Forge Agent 使用教程
+# PatchFlow 使用指南
 
-自主编程智能体，支持对话式代码编辑、自动修复 Bug、运行测试，
-支持 Claude、DeepSeek、OpenAI、Groq、Ollama 多种模型。
+本文是 PatchFlow 的操作手册。项目概览和最短上手路径见 [README.md](README.md)。
 
----
+## 1. 安装与配置
 
-## 目录
-
-1. [安装](#1-安装)
-2. [配置](#2-配置)
-3. [三种使用方式](#3-三种使用方式)
-4. [chat 模式详解](#4-chat-模式详解)
-5. [run 模式详解](#5-run-模式详解)
-6. [GitHub Issue 模式](#6-github-issue-模式)
-7. [查看运行日志](#7-查看运行日志)
-8. [安全机制](#8-安全机制)
-9. [Docker 沙箱](#9-docker-沙箱)
-10. [写好任务描述的技巧](#10-写好任务描述的技巧)
-11. [常见问题](#11-常见问题)
-12. [配置参考](#12-配置参考)
-
----
-
-## 1. 安装
-
-**环境要求：** Python 3.11+、pip
+要求 Python 3.11+。
 
 ```bash
-# 克隆项目
-git clone <repo-url>
-cd forge-agent
-
-# 创建虚拟环境（推荐）
+git clone <repo-url> PatchFlow
+cd PatchFlow
 python -m venv .venv
-source .venv/bin/activate        # macOS/Linux
-# .venv\Scripts\activate         # Windows
-
-# 安装
+source .venv/bin/activate
 pip install -e ".[dev]"
-
-# 验证安装
 agent --help
 ```
 
-**可选：安装更多语言的代码解析支持**（让 repo-map 对更多语言精确分析）
-
-```bash
-pip install \
-    tree-sitter-javascript \
-    tree-sitter-typescript \
-    tree-sitter-go \
-    tree-sitter-rust \
-    tree-sitter-java \
-    tree-sitter-cpp \
-    tree-sitter-c \
-    tree-sitter-ruby
-```
-
-**可选：安装 tiktoken**（精确 token 计数，网络可访问时推荐）
-
-```bash
-pip install tiktoken
-```
-
----
-
-## 2. 配置
-
-### 2.1 选择模型提供商
-
-编辑 `config/default.yaml`，根据你使用的服务商填写：
-
-**SiliconFlow + DeepSeek-V4-Flash（推荐，性价比高）**
+默认配置在 `config/default.yaml`：
 
 ```yaml
 llm:
   provider: openai
-  model: deepseek-ai/DeepSeek-V4-Flash   # 快速版，适合日常任务
+  model: deepseek-ai/DeepSeek-V4-Flash
   api_key: ${SILICONFLOW_API_KEY}
   base_url: https://api.siliconflow.cn/v1
+  max_tokens: 8192
+
+agent:
+  max_steps: 40
+  budget_tokens: 80000
+  log_dir: ./logs
+
+context:
+  repo_map_budget: 8000
+  history_window: 20
+  enable_compression: true
+  enable_long_memory: true
+  long_memory_limit: 5
 ```
 
-**Anthropic Claude**
-
-```yaml
-llm:
-  provider: anthropic
-  model: claude-sonnet-4-5
-  api_key: ${ANTHROPIC_API_KEY}
-  base_url:                        # 留空
-```
-
-**OpenAI**
-
-```yaml
-llm:
-  provider: openai
-  model: gpt-4o
-  api_key: ${OPENAI_API_KEY}
-  base_url:                        # 留空
-```
-
-**Groq（速度极快，适合调试）**
-
-```yaml
-llm:
-  provider: groq
-  model: llama3-70b-8192
-  api_key: ${GROQ_API_KEY}
-  base_url: https://api.groq.com/openai/v1
-```
-
-**Ollama（本地运行，免费）**
-
-```yaml
-llm:
-  provider: ollama
-  model: llama3               # 本地已拉取的模型名
-  api_key:                    # 留空
-  base_url: http://localhost:11434/v1
-```
-
-### 2.2 设置 API Key
-
-将 API Key 设置为环境变量（**不要**把 Key 明文写进 yaml 文件）：
+设置对应服务商的环境变量：
 
 ```bash
-# 写进 ~/.bashrc 或 ~/.zshrc，永久生效
-export SILICONFLOW_API_KEY=sk-xxxxxxxxxxxxxxxx
-export ANTHROPIC_API_KEY=sk-ant-xxxxxxxxxxxxxxxx
-export OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxx
-
-# 重新加载（或重开终端）
-source ~/.bashrc
+export SILICONFLOW_API_KEY=sk-xxx
+# 或 ANTHROPIC_API_KEY / OPENAI_API_KEY
 ```
 
-### 2.3 验证配置
+验证：
 
 ```bash
 python scripts/smoke_test.py
 ```
 
-看到 `✅ COMPLETE` 表示 API 联通、工具执行正常，可以开始使用。
-
----
-
-## 3. 三种使用方式
-
-| 方式 | 命令 | 适合场景 |
-|------|------|---------|
-| **chat** | `agent chat` | 持续对话，边改边聊，最常用 |
-| **run** | `agent run --task "..."` | 一次性明确任务，批处理 |
-| **GitHub Issue** | `python -m entry.github_issue` | 自动修复 Issue 并提 PR |
-
----
-
-## 4. chat 模式详解
-
-### 基本用法
+可选安装更多语言 parser 和精确 token 计数：
 
 ```bash
-# 在当前目录的项目上启动
-cd /path/to/your/project
+pip install -e ".[full]"
+```
+
+## 2. Chat 模式
+
+```bash
 agent chat
-
-# 指定项目目录
 agent chat --repo /path/to/project
-
-# 切换模型（不改配置文件）
 agent chat --model deepseek-ai/DeepSeek-V4-Flash
-agent chat --model gpt-4o --provider openai
+agent chat --sandbox
 ```
 
-### 交互界面
+对话命令：
 
-启动后进入交互界面：
+- `/stats`：查看本轮统计
+- `/clear`：清空历史，保留初始上下文
+- `/help`：帮助
+- `/exit`：退出
 
-```
-🤖 Coding Agent — Chat Mode
-  Provider : deepseek
-  Model    : deepseek-ai/DeepSeek-V4-Flash
-  Repo     : /your/project
-  Type your task. Commands: /exit /stats /clear /help
+Chat 适合连续探索、分步修复和追问。危险命令默认要求确认。
 
-you >
-```
-
-直接输入任务描述，按 Enter 发送。支持：
-- **退格键**删除字符
-- **↑↓ 方向键**翻历史输入
-- **Ctrl+A** 跳到行首，**Ctrl+E** 跳到行尾
-
-### 内置命令
-
-| 命令 | 说明 |
-|------|------|
-| `/exit` 或 `/quit` | 退出 |
-| `/stats` | 显示本次会话统计（轮次、步数、Token 消耗） |
-| `/clear` | 清空对话历史，重新开始（不退出） |
-| `/help` | 显示命令帮助 |
-
-### 多轮对话示例
-
-```
-you > 帮我看一下这个项目有哪些模块
-
-  Agent working...
-  （agent 探索文件结构，逐字流式输出分析结果）
-
-  ─── Round 1 · 2 steps · 1,234 tokens · 5.2s ───
-
-you > utils.py 里的 parse_date 函数不能处理空字符串，修一下
-
-  Agent working...
-  （agent 读取文件、修改代码、运行测试）
-
-  ─── Round 2 · 4 steps · 3,421 tokens · 12.1s ───
-
-you > 给这个修复补上单元测试
-
-  ─── Round 3 · 3 steps · 2,890 tokens · 9.3s ───
-
-you > /stats
-
-  Session stats:
-    Rounds  : 3
-    Steps   : 9
-    Tokens  : 7,545
-```
-
-**关键特性：每轮对话结束后历史保留**，agent 下一轮能看到之前做了什么，不需要重复描述上下文。
-
-### 输出结构说明
-
-```
-  Agent working...
-  （流式打印模型思考内容）          ← 模型实时输出，逐字显示
-
-  [1] shell  ls -la                 ← 第1步，调用 shell 工具
-  ✓                                 ← 执行成功
-    main.py utils.py parser.py      ← 输出前几行
-
-  [2] file_read  src/parser.py      ← 第2步，读取文件
-  ✓
-
-  [3] apply_patch  src/parser.py    ← 第3步，应用结构化补丁
-  ✓  Applied patch: replace_range
-
-  [4] test  tests/                  ← 第4步，运行测试
-  ✓  5 passed in 0.12s
-
-  ⟳ Reflection (test_failed)        ← 测试失败时自动反思
-
-  ─── Round 2 · 4 steps · 3,421 tokens · 12.1s ───
-```
-
----
-
-## 5. run 模式详解
-
-适合任务描述明确、不需要来回交互的场景。
-
-### 基本用法
+## 3. Run 模式
 
 ```bash
-# 最简单：在当前目录执行任务
-agent run --task "修复所有 failing 的测试"
-
-# 指定 repo
-agent run --repo /path/to/project --task "重构 api.py，拆分成更小的函数"
-
-# 任务描述写在文件里（推荐用于复杂任务）
-agent run --task-file task.txt
+agent run --repo /path/to/project --task "修复 tests/test_parser.py 的失败"
+agent run --repo /path/to/project --task-file task.txt
+agent run --task "..." --model <model> --max-steps 20
+agent run --task "..." --confirm
+agent run --task "..." --sandbox
 ```
 
-### 所有选项
-
-```
--r, --repo TEXT       目标 repo 路径（默认当前目录）
--t, --task TEXT       任务描述（自然语言）
--f, --task-file TEXT  从文件读取任务描述
--m, --model TEXT      覆盖模型名
--p, --provider TEXT   覆盖 provider
-    --max-steps INT   最大步数（默认 40）
--s, --stream          流式输出（默认开启）
-    --confirm         危险命令需要用户确认
-    --sandbox         在 Docker 沙箱里执行命令
--v, --verbose         显示 debug 日志
-```
-
-### 运行工件
-
-`agent run` 结束后会自动导出一份可回放的工件目录，便于离线分析和 benchmark 统计。
-
-默认会生成在日志目录下的 `artifacts/<task_id>_<timestamp>/`，目录里通常包含：
-
-- `events.json`：结构化事件流
-- `metrics.json`：基础指标统计
-- `run_manifest.json`：模型配置、代码版本、任务版本、运行环境、source repo / workspace repo
-- `retrievals.json`：检索命中记录
-- `memory_hits.json`：本次 run 真正注入 prompt 的 long memory 线索、成功模式和恢复提示
-- `patches.json`：结构化 patch 轨迹
-- `result.json`：任务结果摘要
-- `final_report.md`：最终人类可读报告，包含候选检索、edit plan、review、测试和回滚方式
-- `final_diff.patch`：最终 diff（如果任务产生了改动）
-
-如果你要看一次运行到底“检索了什么、改了什么、测了什么”，优先看这个目录。
-
-如果任务配置了 `test_cmd`，agent 在模型输出 FINISH 后还会自动再跑一次目标验证；验证失败不会立刻结束，而是把失败输出作为新反馈喂回模型继续修。结束前还会对最终 patch 做轻量自审，拦截冲突标记、`breakpoint()`、`pdb.set_trace()` 等明显不该提交的内容。
-
-`metrics.json` 会额外记录这些 coding 能力信号：
-- `finish_verification_attempts` / `finish_verification_failures`
-- `self_review_attempts` / `self_review_failures`
-- `taxonomy_recovery_prompts`
-- `auto_symbol_probes`
-- `long_memory_hits`
-- `context_compressions`
-- `failure_analyses`
-- `edit_plans`
-- `patch_review_failures`
-
-### 典型使用场景
+执行模式：
 
 ```bash
-# 修复特定测试
-agent run --task "tests/test_api.py::test_auth 报错 KeyError，修复它"
-
-# 添加功能
-agent run --task "在 src/api.py 里添加 /health 接口，返回 {status: ok, version: 1.0}"
-
-# 代码重构
-agent run --task "把 utils.py 里超过 50 行的函数拆分成更小的函数，保持测试通过"
-
-# 安全执行（危险命令需确认）
-agent run --task "清理项目，删除所有 .pyc 文件和 __pycache__ 目录" --confirm
-
-# Docker 沙箱（命令在容器里执行，不影响宿主机环境）
-agent run --task "安装依赖并运行测试" --sandbox
+agent run --task "分析潜在风险" --run-mode safe
+agent run --task "修复问题" --run-mode review --confirm
+agent run --task "修复问题" --run-mode auto
 ```
 
----
+| 模式 | 行为 |
+| --- | --- |
+| `safe` | 只分析和计划，不写文件 |
+| `review` | 生成 patch preview，确认后应用 |
+| `auto` | 自动编辑、验证和结束，默认模式 |
 
-## 6. GitHub Issue 模式
-
-自动从 GitHub Issue 拉取任务描述，运行 agent，完成后创建 PR。
-
-### 准备工作
-
-```bash
-# 设置 GitHub Token（需要 repo 权限）
-export GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxx
-```
-
-在 GitHub → Settings → Developer settings → Personal access tokens 创建，
-勾选 `repo` 权限。
-
-### 使用
-
-```bash
-python -m entry.github_issue \
-    --repo owner/repo-name \
-    --issue 42 \
-    --local-path /tmp/myrepo
-```
-
-**参数说明：**
-
-```
--r, --repo TEXT         GitHub 仓库（格式：owner/repo）
--i, --issue INTEGER     Issue 编号
--l, --local-path TEXT   本地路径（会自动 clone，已存在则直接用）
--c, --config TEXT       配置文件路径
-    --no-pr             只修复代码，不创建 PR
-    --base-branch TEXT  PR 目标分支（默认 main）
--v, --verbose           显示详细日志
-```
-
-**执行流程：**
-
-1. 拉取 Issue #42 的标题和描述作为任务
-2. Clone repo 到 `/tmp/myrepo`（已存在则跳过）
-3. 创建新分支 `agent/fix-issue-42-xxxxxxxx`
-4. 在新分支上运行 agent 完成任务
-5. Push 分支到远端
-6. 自动创建 PR，标题和描述自动生成
-
----
-
-## 7. 查看运行日志
-
-每次运行会在 `./logs/` 目录下生成 JSONL 格式的事件日志，记录完整的运行过程。
-
-### 列出日志文件
-
-```bash
-agent log list
-agent log list --dir ./logs    # 指定日志目录
-```
-
-输出示例：
-
-```
-Log files in ./logs:
-
-  abc12345_20250525_143022.jsonl  (12.3 KB)
-  def67890_20250524_091534.jsonl  (8.7 KB)
-```
-
-### 查看单次运行详情
-
-```bash
-agent log show logs/abc12345_20250525_143022.jsonl
-```
-
-输出示例：
-
-```
-Event Log: abc12345_20250525_143022.jsonl
-  Total events : 18
-  Actions      : 6
-  Reflections  : 1
-  Tool calls   : {'shell': 2, 'file_read': 1, 'apply_patch': 1, 'test': 2}
-  Final status : task_complete
-
-Events:
-  14:30:22  task_start
-  14:30:25  action          tool=shell
-  14:30:25  observation     status=success
-  14:30:28  action          tool=file_read
-  ...
-  14:30:51  task_complete
-```
-
-日志文件是标准 JSON Lines 格式，每行一个事件，可以用任何工具分析：
-
-```bash
-# 用 jq 查看所有 action
-cat logs/abc12345_*.jsonl | jq 'select(.event_type=="action") | .payload.action.thought'
-
-# 统计工具调用次数
-cat logs/abc12345_*.jsonl | jq 'select(.event_type=="action") | .payload.action.tool_call.name' | sort | uniq -c
-```
-
-### 查看工件目录
-
-```bash
-ls logs/artifacts
-cat logs/artifacts/abc12345_20250525_143022/metrics.json | jq '.'
-```
-
-这类工件特别适合做：
-
-- offline debugging
-- retrieval 命中分析
-- graph_neighbors 关系分析
-- 失败后自动图探测 / 自动 file prefetch 的轨迹分析
-- 测试失败后的自动 `find_symbol` 符号探测轨迹分析
-- patch 成功率统计
-- patch 冲突 / 回滚统计
-- FINISH 前验证、自审和 taxonomy recovery 触发次数
-- 长期记忆命中和上下文压缩触发次数
-- benchmark 汇总
-
-### 看图效果
-
-如果你想直接验证图结构代码理解是否真的生效，推荐跑一条小任务，再看工件里的 `retrievals.json`：
-
-```bash
-agent benchmark run --repo . --tasks-dir ./benchmark_tasks --task-glob "03_run_demo.txt" --limit 1
-cat logs/artifacts/<run_id>/retrievals.json | jq '.'
-```
-
-重点看这些字段：
-
-- `graph_neighbors` 是否出现
-- `auto_graph_probe` 是否为 `true`
-- `auto_file_prefetch` 是否为 `true`
-- `matches` 里是否优先出现了目标文件和它的一跳邻居
-
-如果这些都出现了，说明图结构不仅被看到了，而且真的参与了后续工具调用。
-
-### 典型轨迹
-
-```mermaid
-flowchart LR
-  A["Task + front matter"] --> B["RepoMap / graph neighbors"]
-  B --> C["Auto file_read"]
-  C --> D["Reflection on test failure"]
-  D --> E["apply_patch / revert_patch"]
-  E --> F["Targeted verification"]
-  F --> G["Artifacts + metrics"]
-```
-
-这条链路里最值得看的，就是图分析有没有把 `file_read` 的对象选对，以及后续 `apply_patch` 是否只改了最小范围。
-
-如果一次测试失败输出里包含函数名、类名或 pytest 的测试名，agent 还会自动尝试 `find_symbol`。这能把“看报错猜文件”推进到“用符号索引定位定义”，对应事件会在 `retrievals.json` 和 `metrics.json` 里体现为 `auto_symbol_probe` / `auto_symbol_probes`。
-
-如果你想直接看多次运行的整体结果：
-
-```bash
-agent benchmark summarize --dir ./logs/artifacts
-agent benchmark summarize --dir ./logs/artifacts --only-agent-runs
-agent benchmark summarize --dir ./logs/artifacts --json-output
-agent benchmark summarize --dir ./logs/artifacts --markdown-out ./summary.md
-agent benchmark compare --left ./logs/baseline/artifacts --right ./logs/new/artifacts
-agent benchmark compare --left ./logs/baseline/artifacts --right ./logs/new/artifacts --only-agent-runs
-agent benchmark compare --left ./logs/baseline/artifacts --right ./logs/new/artifacts --markdown-out ./compare.md
-agent benchmark run --repo . --tasks-dir ./benchmark_tasks
-agent benchmark run --repo . --tasks-dir ./benchmark_tasks --task-glob "*.txt" --limit 2
-agent benchmark run --repo . --tasks-dir ./benchmark_tasks --task-glob "v2_*.txt" --mechanism-profile baseline
-agent benchmark run --repo . --tasks-dir ./benchmark_tasks --task-glob "v2_*.txt" --mechanism-profile full
-agent benchmark run --repo . --tasks-dir ./benchmark_tasks --task-glob "v2_*.txt" --limit 15 --mechanism-profile full --task-timeout-seconds 300
-agent benchmark ablation-report --dir ./logs/artifacts --markdown-out ./ablation_report.md
-agent patch latest --artifact-dir ./logs/artifacts/<run_id>
-agent patch rollback --artifact-dir ./logs/artifacts/<run_id> --repo .
-agent benchmark patch-replay --artifact-dir ./logs/artifacts/<run_id> --repo ./benchmark_fixtures/run_demo
-agent benchmark reset-fixtures --repo .
-```
-
-如果任务文件带 front matter，`benchmark run` 还会自动使用任务自己的 `repo`、`test_path`、`test_cmd`、`lint_cmd`、`patch_policy_cmd`、`exclude_paths`、`target_files`、`max_steps` 和 `finish_if_verified` 设置。`test_cmd` 会被封装成 `CommandGrader`；如果再声明 `lint_cmd` 或 `patch_policy_cmd`，则会自动组合成 `CompositeGrader`。
-每个任务每次运行前都会先复制到独立 workspace，再在 workspace 里跑 agent 和 grader。artifact 里的 `run_manifest.json` 会记录 `repo_source`、`workspace_repo`、模型配置、代码版本、任务文件 hash 和运行环境。仓库里推荐把任务和示例仓库统一放在 `benchmark_fixtures/` 下，方便 benchmark、试玩和恢复基线共用一套目录。
-设置 `--task-timeout-seconds` 后，每个 benchmark task 会放进独立 worker 子进程里执行；父进程负责硬超时终止并导出 timeout artifact，避免远端模型 API 或工具调用阻塞整批实验。
-默认的 `--skip-preverified` 会在进入 LLM 前先跑目标验证；如果任务已经是通过状态，就直接记成一次成功的 benchmark 工件，`steps=0`、`tokens=0`。
-如果你想排除这些预检直接通过的样本，在 `summarize` 或 `compare` 时加 `--only-agent-runs`。如果 benchmark 把 fixture 改脏了，可以用 `benchmark reset-fixtures` 恢复到未修复初始态。
-新的 benchmark 汇总还会显示 `graph_queries`、`patch_conflicts`、`patch_reverts`、`finish_verification_failures`、`self_review_failures`、`taxonomy_recovery_prompts`、`auto_symbol_probes`、`failure_analyses`、`edit_plans`、`patch_review_failures`、`first_pass_success_rate`、`failure_type_distribution` 和 `failure_stage_distribution`。每条 run 也会输出 `failure_type`、`failure_stage`、`failure_message`，方便区分是 agent、grading、workspace 还是模型层出了问题。
-Markdown report 现在使用固定模板，包含总成功率、任务数、平均 steps、平均 tokens、平均耗时、失败类型分布、每个任务结果、patch 文件和 baseline 对比。
-如果你想重放某次结构化 patch，可以直接用 `benchmark patch-replay`；加 `--reverse` 会重放对应的 `reverse_patch`。
-
-`benchmark run` 还会追加两份本地记忆：
-- `logs/memory/run_memory.jsonl`：原始 run 级记录，保留 task、repo、test command、success、steps、failure taxonomy 和结果摘要。
-- `logs/memory/experience_memory.jsonl`：只收敛成功 run 的经验卡片，方便按 `category` / `failure_type` 复用成功模式；会按稳定经验签名去重，避免重复 lesson 越积越多。
-
-### V2 运行模式与机制开关
-
-日常 run 支持三种模式：
-
-```bash
-agent run --task "修复 parser 空字符串问题" --run-mode safe
-agent run --task "修复 parser 空字符串问题" --run-mode review --confirm
-agent run --task "修复 parser 空字符串问题" --run-mode auto
-```
-
-机制开关用于消融实验或排查行为：
+可单独关闭机制用于排查或消融：
 
 ```bash
 agent run --task "..." --disable-failure-analyzer
@@ -551,429 +109,237 @@ agent run --task "..." --disable-self-review
 agent run --task "..." --disable-long-memory --disable-compression
 ```
 
-V2 默认机制：
-- failure analyzer：解析 pytest output、traceback、tool failure，输出 failed tests、error type、traceback files、suspect symbols。
-- hybrid retrieval：综合失败分析、target files、关键词和符号命中，生成候选文件及 reasons。
-- edit plan：写操作前记录 `EDIT_PLAN`，包含 target files、修改意图、预期行为、风险和测试命令。
-- patch self-review：检查冲突标记、debug hook、测试文件修改、exclude paths、过大 patch。
-- benchmark verify_task：benchmark 模式下的受控验证入口，只运行任务配置的 grader / `test_cmd`，避免模型扩大到整份测试文件。
-- final report：每次 run 导出 `final_report.md`。
+## 4. Benchmark
 
-V2 benchmark 包含 30 个 `v2_*.txt` 分层任务，覆盖 `bugfix`、`edge_case`、`import_api`、`test_driven`、`refactor_safe`、`config_cli`。可以这样跑消融：
+### 任务格式
 
-```bash
-agent benchmark run --repo . --tasks-dir ./benchmark_tasks --task-glob "v2_*.txt" --mechanism-profile baseline
-agent benchmark run --repo . --tasks-dir ./benchmark_tasks --task-glob "v2_*.txt" --mechanism-profile partial
-agent benchmark run --repo . --tasks-dir ./benchmark_tasks --task-glob "v2_*.txt" --mechanism-profile full
-agent benchmark ablation-report --dir ./logs/artifacts --markdown-out ./ablation_report.md
-```
-
-推荐复现口径是固定题量和单题硬超时：
-
-```bash
-agent benchmark run --repo . --tasks-dir ./benchmark_tasks --task-glob "v2_*.txt" --limit 15 --mechanism-profile baseline --task-timeout-seconds 300
-agent benchmark run --repo . --tasks-dir ./benchmark_tasks --task-glob "v2_*.txt" --limit 15 --mechanism-profile partial --task-timeout-seconds 300
-agent benchmark run --repo . --tasks-dir ./benchmark_tasks --task-glob "v2_*.txt" --limit 15 --mechanism-profile full --task-timeout-seconds 300
-agent benchmark ablation-report --dir ./logs/artifacts --markdown-out ./ablation_report.md
-```
-
-当前 V2 参考结果（DeepSeek-V4-Flash，前 15 个 `v2_*.txt` 任务，单题 `300s`）：
-
-| profile | success | avg steps | avg tokens | avg time |
-| --- | ---: | ---: | ---: | ---: |
-| baseline | 14/15 | 4.80 | 38,860 | 105.99s |
-| partial | 13/15 | 4.47 | 34,181 | 55.64s |
-| full | 15/15 | 5.80 | 47,265 | 96.44s |
-| full + verify_task | 15/15 | 4.47 | 32,022 | 53.83s |
-
-这组数据的读法是：`partial` 在成功样本上更轻，但更容易在少数任务上进入 timeout；`full` 通过 failure analyzer、hybrid retrieval、edit plan、patch self-review、long memory、context compression 和 auto-finish 形成闭环，当前样本达到 `15/15`。加入 `verify_task` 后，模型更少做 broad pytest 验证，broad 无效验证尝试从 `2/15` 降到 `0/15`。
-
-另外，仓库里还维护了一份 SWE-bench Lite 的 30 题阶段性结果记录，当前覆盖 `astropy`、`django`、`requests`、`sympy`、`pytest`：
-
-- 总计 `30` 题
-- `24` 题通过 / 修通
-- `3` 题失败
-- `3` 题属于 `evaluation-blocked`
-
-完整明细见：
+每个 `.txt` 文件是一项任务：
 
 ```text
-docs/benchmark_results_30.md
-```
-
-### 长记忆与上下文压缩
-
-默认情况下，agent 会启用两层记忆：
-
-- `ConversationHistory`：当前 run / chat 的短期上下文，保留最近消息。
-- `Context compression`：短期上下文超过窗口时，旧消息不会直接丢弃，而是压缩成 `[COMPRESSED CONTEXT]` 摘要。
-- `Long memory`：跨 run 的本地 JSONL 记忆，原始记录在 `logs/memory/run_memory.jsonl`，成功经验库在 `logs/memory/experience_memory.jsonl`。
-
-可以在 `config/default.yaml` 里配置：
-
-```yaml
-context:
-  history_window: 20
-  enable_compression: true
-  enable_long_memory: true
-  long_memory_limit: 5
-```
-
-新任务开始时，agent 会根据 repo、任务描述、`category`、`expected_failure_type` 从 long memory 里检索相关记录，并注入类似：
-
-```text
-[LONG MEMORY] Relevant prior run memories:
-Successful patterns for category=bugfix:
-- Prefer targeted verification first: pytest tests/test_parser.py -q
-Recovery hints for failure_type=verification_failed:
-- Previous failure was classified as verification_failed; recover using the matching taxonomy strategy.
-- status=success steps=3 memory=experience category=bugfix test_cmd=pytest tests/test_parser.py -q :: Fixed parser empty string handling
-```
-
-当旧上下文被压缩时，后续 prompt 会包含：
-
-```text
-[COMPRESSED CONTEXT] Summary of 8 older messages.
-Recent older actions: file_read (...); apply_patch (...)
-Known failures: Traceback: ...
-Failure trajectory to preserve: FAILED tests/test_parser.py::test_empty - AssertionError ...
-Prior successful patterns: Prefer targeted verification first: pytest tests/test_parser.py -q
-Files mentioned: parser.py, tests/test_parser.py
-```
-
-也就是说，当前版本不是简单“把旧消息缩短”：
-- 成功经验会先被聚合成更短的 pattern card，再注入 prompt
-- 失败轨迹会比普通 observation 更优先保留
-- 即使 long memory 本身后续滑出窗口，它提炼出的成功模式和失败轨迹仍会被 compression 继续保留下来
-
-这两套能力仍然是本地、确定性、无外部依赖的 MVP。后续如果要接 embedding/vector store，可以直接替换 long memory 的检索实现，不需要改 agent loop。
-
 ---
-
-## 8. 安全机制
-
-Agent 有三层保护，防止误操作：
-
-### 层 1：硬拦截黑名单（永远不执行，不问用户）
-
-以下命令会被直接拒绝，任何情况下都不执行：
-
-- `rm -rf /`、`rm -rf ~`
-- `mkfs`（格式化磁盘）
-- `dd if=`（磁盘写入）
-- `:(){:|:&};:`（fork bomb）
-- `chmod -R 777 /`
-- `> /dev/sda`
-
-### 层 2：只读白名单（直接执行，不需确认）
-
-以下命令被认为是安全的只读操作，直接执行：
-
-`ls`、`cat`、`grep`、`find`、`git status`、`git diff`、`git log`、
-`pytest`、`python -m pytest`、`echo`、`pwd`、`diff`、`tree` 等
-
-### 层 3：写操作确认（仅在 `--confirm` 模式下）
-
-以下命令需要用户确认：
-
-`rm`、`mv`、`pip install`、`git commit`、`git push`、`curl`、`wget`、
-`chmod`、`sudo`、`docker`、重定向覆盖（`>`）等
-
-**默认行为（不加 `--confirm`）**：层 3 跳过，直接执行。适合自动化场景。
-
-**开启确认（加 `--confirm`）**：遇到写操作会提示：
-
-```
-  ⚠  Agent wants to run:
-     $ git commit -m "fix parser bug"
-  Allow? [y/N]
-```
-
-**chat 模式默认开启确认**，每次执行危险命令都会询问。
-
+repo: benchmark_fixtures/run_demo
+test_path: test_report.py
+lint_cmd: python -m ruff check .
+patch_policy_cmd: python scripts/check_patch_policy.py
+target_files: report.py, scores.py
+exclude_paths: logs, README.md
+category: bugfix
+difficulty: medium
+expected_failure_type: verification_failed
+max_steps: 12
+finish_if_verified: true
+skip_preverified: true
 ---
-
-## 9. Docker 沙箱
-
-加 `--sandbox` 参数，所有 shell 命令、测试、git 操作都在 Docker 容器里执行，
-宿主机环境完全隔离。
-
-### 前提
-
-确保 Docker Desktop 已安装并运行：
-
-```bash
-docker --version
-docker info    # 应该能正常输出
+修复成绩报告生成逻辑，并保持现有接口不变。
 ```
 
-### 使用
+常用字段：
+
+| 字段 | 作用 |
+| --- | --- |
+| `repo` | 相对 `--repo` 的任务仓库 |
+| `test_path` / `test_cmd` | 目标测试或自定义验证命令 |
+| `lint_cmd` | lint grader |
+| `patch_policy_cmd` | patch policy grader |
+| `target_files` | 优先检索和分析的文件 |
+| `exclude_paths` | repo-map 和图分析排除路径 |
+| `max_steps` | 单任务最大步数 |
+| `finish_if_verified` | 目标验证通过时允许提前结束 |
+| `skip_preverified` | 初始验证已通过时跳过模型调用 |
+
+多个 grader 会全部执行并聚合结果。每个任务先复制到独立 workspace，再运行 agent 和 grader，不污染原始 fixture。
+
+### 批量运行
 
 ```bash
-# run 模式开启沙箱
-agent run --task "安装依赖并运行所有测试" --sandbox
+agent benchmark run --repo . --tasks-dir ./benchmark_tasks
+agent benchmark run \
+  --repo . \
+  --tasks-dir ./benchmark_tasks \
+  --task-glob "v2_*.txt" \
+  --limit 15 \
+  --mechanism-profile full \
+  --task-timeout-seconds 300
+```
 
-# chat 模式开启沙箱
+重要选项：
+
+- `--workspace-root`：独立 workspace 根目录
+- `--task-timeout-seconds`：父进程硬超时
+- `--skip-preverified / --no-skip-preverified`：是否跳过初始已通过任务
+- `--mechanism-profile baseline|partial|full`：机制组合
+- `--sandbox`：任务命令在 Docker 中运行
+
+### 汇总和对比
+
+```bash
+agent benchmark summarize --dir ./logs/artifacts
+agent benchmark summarize --dir ./logs/artifacts --only-agent-runs --json-output
+agent benchmark summarize --dir ./logs/artifacts --markdown-out summary.md
+
+agent benchmark compare \
+  --left ./logs/baseline/artifacts \
+  --right ./logs/current/artifacts \
+  --markdown-out compare.md
+
+agent benchmark ablation-report \
+  --dir ./logs/artifacts \
+  --markdown-out ablation.md
+```
+
+报告包含成功率、任务数、平均 steps/tokens/耗时、失败类型和阶段分布、每任务结果、patch 链接及 baseline 对比。
+
+### Fixture 与 patch
+
+```bash
+agent benchmark reset-fixtures --repo .
+agent benchmark patch-replay \
+  --artifact-dir ./logs/artifacts/<run> \
+  --repo ./benchmark_fixtures/run_demo
+```
+
+阶段性 SWE-bench Lite 结果见 [docs/benchmark_results_30.md](docs/benchmark_results_30.md)。
+
+## 5. 工件、日志与回滚
+
+运行日志默认位于 `logs/*.jsonl`：
+
+```bash
+agent log list
+agent log show logs/<run>.jsonl
+```
+
+artifact 默认位于 `logs/artifacts/<run>/`：
+
+| 文件 | 内容 |
+| --- | --- |
+| `events.json` / `events.jsonl` | action、observation、reflection、终止事件 |
+| `result.json` | status、summary、failure taxonomy |
+| `metrics.json` | 运行和能力指标 |
+| `run_manifest.json` | 模型、代码/任务版本、环境、source/workspace repo |
+| `retrievals.json` | repo-map、关键词、符号和图检索 |
+| `patches.json` | patch、reverse patch、冲突和回滚轨迹 |
+| `memory_hits.json` | 本次使用的长期记忆 |
+| `final_diff.patch` | 最终 diff |
+| `final_report.md` | 单次运行报告 |
+
+失败 run 会记录：
+
+- `failure_type`：如 verification、timeout、workspace、tool、LLM 错误
+- `failure_stage`：preverify、agent loop、grading、artifact export 等阶段
+- `failure_message`：可读错误信息
+
+查看和回滚 patch：
+
+```bash
+agent patch latest --artifact-dir logs/artifacts/<run>
+agent patch rollback --artifact-dir logs/artifacts/<run> --repo /path/to/project
+```
+
+## 6. 记忆与上下文
+
+PatchFlow 使用两层上下文：
+
+- 短期历史：当前 run/chat 的最近消息
+- 上下文压缩：窗口溢出时保留旧行动、文件、失败轨迹和成功模式摘要
+- 长记忆：跨 run 检索同 repo、category、failure type 的经验
+
+本地记忆文件：
+
+```text
+logs/memory/run_memory.jsonl
+logs/memory/experience_memory.jsonl
+```
+
+通过 `context.enable_compression`、`context.enable_long_memory` 和 `context.long_memory_limit` 配置；也可以用 CLI 开关临时关闭。
+
+## 7. Docker 与安全
+
+Docker 沙箱：
+
+```bash
+docker info
+agent run --task "修复并测试" --sandbox
 agent chat --sandbox
 ```
 
-首次使用会拉取 `python:3.11-slim` 镜像（约 150MB），之后复用。
+沙箱默认断网，将目标 repo 挂载到 `/workspace`，session 结束后自动清理。镜像可通过 `PATCHFLOW_SANDBOX_IMAGE` 覆盖。
 
-### 沙箱特性
+命令安全分三层：
 
-- 容器默认**断网**（`--network none`），防止 agent 随意发网络请求
-- repo 目录通过 bind mount 挂载进容器，**文件修改双向可见**
-  - 宿主机写的文件，容器里能读到
-  - 容器里修改的文件，宿主机立刻看到
-- 容器在 session 结束时**自动清理**
+- 硬拦截：明显破坏系统的命令永不执行
+- 只读命令：状态查看、搜索、测试等直接执行
+- 危险写操作：使用 `--confirm` 时执行前询问
 
----
+`--confirm` 适合人工运行；自动 benchmark 通常依靠独立 workspace 和 Docker 隔离。
 
-## 10. 写好任务描述的技巧
-
-任务描述的质量直接决定 agent 的效果。
-
-### 基本原则：具体 > 模糊
+## 8. GitHub Issue
 
 ```bash
-# ❌ 太模糊，agent 不知道从哪里下手
-agent run --task "fix bug"
-
-# ✅ 具体说明文件、现象、预期结果
-agent run --task "src/parser.py 的 parse() 函数在输入空字符串时抛 ValueError，
-应该返回 None。修复它并在 tests/test_parser.py 里补上这个 case 的测试。"
-```
-
-### 描述模板
-
-```
-[文件/模块]里的[函数/类]在[什么情况]下[出现什么问题]，
-应该[预期行为]。
-[可选：修复后运行什么测试验证]
-```
-
-### 常见任务写法
-
-**修复 Bug：**
-```
-tests/test_api.py::test_auth_token 报错 KeyError: 'user_id'。
-原因可能在 src/auth.py 的 verify_token() 函数里。
-修复它，确保测试通过。
-```
-
-**添加功能：**
-```
-在 src/api.py 里添加 GET /api/v1/health 接口，
-返回 JSON：{"status": "ok", "version": "1.0.0", "timestamp": <当前UTC时间>}。
-同时在 tests/test_api.py 里补上这个接口的测试。
-```
-
-**重构代码：**
-```
-src/utils.py 里的 process_data() 函数现在有 200 行，太长了。
-把它拆分成几个职责单一的小函数，保持所有现有测试通过。
-不要改变函数的对外接口。
-```
-
-**代码审查式任务：**
-```
-帮我检查 src/ 目录下所有 Python 文件，找出：
-1. 没有类型注解的公开函数
-2. 超过 50 行的函数
-3. 重复的代码片段
-列出清单就好，不需要修改。
-```
-
-### 复杂任务用文件
-
-```bash
-cat > task.txt << 'EOF'
-重构 src/database.py 模块：
-
-1. 当前问题：
-   - DatabaseManager 类有 15 个方法，职责不清晰
-   - 连接池逻辑和查询逻辑混在一起
-   - 没有错误处理
-
-2. 目标：
-   - 拆分成 ConnectionPool、QueryExecutor 两个类
-   - 每个类不超过 8 个方法
-   - 添加适当的异常处理（用自定义异常类）
-   - 保持现有的所有测试通过
-
-3. 不要改变：
-   - 对外的 API 接口（其他模块 import 的部分）
-   - tests/ 目录下的任何文件
-EOF
-
-agent run --task-file task.txt
-```
-
----
-
-## 11. 常见问题
-
-**Q：agent 没有任何输出，卡住了**
-
-先跑 `python scripts/smoke_test.py` 检查 API 是否联通。如果网络正常但还是卡，
-可能是模型响应慢，加 `--verbose` 看详细日志：
-```bash
-agent chat --verbose
-```
-
-**Q：agent 陷入循环，一直重复同样的操作**
-
-内置循环检测会自动处理（连续 3 步完全相同的操作会触发 GIVE_UP）。
-如果想提前中断，按 `Ctrl+C`，然后 `/clear` 清空历史重新描述任务。
-
-**Q：测试失败后 agent 怎么处理**
-
-内置 Reflection 机制：测试失败时 agent 会自动重新分析错误原因，
-尝试不同的修复策略，最多继续尝试直到达到 `max_steps` 上限。
-
-**Q：修改了文件但不满意，怎么撤销**
-
-agent 不自动 commit，所有修改都在工作区。直接用 git 撤销：
-```bash
-git checkout -- .          # 撤销所有未提交的修改
-git checkout -- src/foo.py # 撤销特定文件
-```
-
-**Q：token 消耗太多**
-
-几个节省 token 的方法：
-```bash
-# 用 flash 版本替代 pro 版本
-agent chat --model deepseek-ai/DeepSeek-V4-Flash
-
-# 缩小 repo-map 预算（减少上下文注入量）
-# 编辑 config/default.yaml：
-context:
-  repo_map_budget: 4000    # 从 8000 降到 4000
-
-# 减少历史窗口
-context:
-  history_window: 10       # 从 20 降到 10
-```
-
-**Q：沙箱模式里没有项目需要的依赖**
-
-在任务描述里告诉 agent 先安装：
-```bash
-agent run --task "先运行 pip install -r requirements.txt，然后运行所有测试" --sandbox
-```
-或者用 setup_cmds 在容器启动时预装（需要在代码里配置）。
-
-**Q：GitHub Issue 模式提 PR 失败**
-
-检查 GITHUB_TOKEN 是否有 `repo` 权限。如果只想修代码不提 PR：
-```bash
-python -m entry.github_issue --repo owner/repo --issue 42 \
-    --local-path /tmp/myrepo --no-pr
-```
-
----
-
-## 12. 配置参考
-
-`config/default.yaml` 完整说明：
-
-```yaml
-llm:
-  provider: openai                         # 模型提供商
-  model: deepseek-ai/DeepSeek-V4-Flash     # 模型名
-  api_key: ${SILICONFLOW_API_KEY}          # 环境变量引用
-  base_url: https://api.siliconflow.cn/v1  # OpenAI-compatible 时填写
-  max_tokens: 4096            # 最大输出 token 数
-
-agent:
-  max_steps: 40               # 每轮最大步数（超出则停止）
-  budget_tokens: 80000        # 每轮 token 预算
-  log_dir: ./logs             # 日志目录
-
-tools:
-  shell:
-    timeout: 30               # shell 命令超时秒数
-    max_output_tokens: 8000   # 输出截断长度（防止超长输出爆上下文）
-  file:
-    max_view_lines: 100       # file_view 每次显示的最大行数
-
-context:
-  repo_map_budget: 8000       # repo-map 注入 system prompt 的最大 token 数
-  history_window: 20          # 保留最近 N 轮对话历史
-```
-
-### 多环境配置
-
-可以维护多个配置文件，用 `-c` 参数指定：
-
-```bash
-# 日常开发用 flash（快且省钱）
-agent chat -c config/dev.yaml
-
-# 复杂任务用 pro
-agent run --task "..." -c config/pro.yaml
-```
-
-`config/dev.yaml` 示例：
-
-```yaml
-llm:
-  provider: openai
-  model: deepseek-ai/DeepSeek-V4-Flash
-  api_key: ${SILICONFLOW_API_KEY}
-  base_url: https://api.siliconflow.cn/v1
-
-agent:
-  max_steps: 20               # 开发时少一点，节省时间
-  budget_tokens: 40000
-
-context:
-  repo_map_budget: 4000
-  history_window: 10
-```
-
----
-
-## 快速参考卡
-
-```bash
-# 安装
-pip install -e ".[dev]"
-
-# 设置 Key
-export SILICONFLOW_API_KEY=sk-xxx
-
-# 验证
-python scripts/smoke_test.py
-
-# 日常使用
-cd your-project
-agent chat                          # 开启对话
-agent chat --model deepseek-ai/DeepSeek-V4-Flash  # 切换模型
-
-# 一次性任务
-agent run --task "fix the failing tests"
-agent run --task-file task.txt
-
-# 编辑偏好
-# 默认优先使用 apply_patch；只有整文件重写时才用 file_write
-
-# 安全选项
-agent run --task "..." --confirm    # 危险命令需确认
-agent run --task "..." --sandbox    # Docker 沙箱
-
-# GitHub Issue
 export GITHUB_TOKEN=ghp_xxx
-python -m entry.github_issue -r owner/repo -i 42 -l /tmp/repo
+python -m entry.github_issue \
+  --repo owner/repo \
+  --issue 42 \
+  --local-path /tmp/project
+```
 
-# 查看日志
-agent log list
-agent log show logs/xxx.jsonl
+该入口读取 Issue、运行 agent，并可创建 pull request。Token 需要相应仓库权限。
 
-# 对话内命令
-# /exit   退出
-# /stats  查看统计
-# /clear  清空历史
-# /help   帮助
+## 9. 写任务的建议
+
+任务描述至少包含：
+
+- 问题发生在哪个模块或行为
+- 当前现象与预期结果
+- 应运行的目标测试
+- 不允许改变的接口或目录
+
+示例：
+
+```text
+src/parser.py 的 parse() 在空字符串输入时抛出 ValueError，预期返回 None。
+保持 parse() 的公开签名不变，不修改 tests/。
+修复后运行 tests/test_parser.py::test_empty。
+```
+
+复杂任务建议写入 `task.txt` 后使用 `--task-file`。
+
+## 10. 常见问题
+
+**模型没有响应**
+
+运行 `python scripts/smoke_test.py`，再用 `--verbose` 检查配置、网络和后端错误。
+
+**任务重复操作**
+
+Agent 内置循环检测；也可以中断后缩小任务范围、提供目标测试和目标文件。
+
+**token 消耗较高**
+
+使用更快模型，降低 `repo_map_budget`、`history_window` 或 `max_steps`；benchmark 应优先配置精准 grader。
+
+**沙箱缺依赖**
+
+使用包含依赖的镜像并设置 `PATCHFLOW_SANDBOX_IMAGE`，或在任务允许时先安装依赖。默认沙箱断网。
+
+**需要查看所有 CLI 选项**
+
+```bash
+agent --help
+agent run --help
+agent benchmark run --help
+```
+
+## 11. 开发验证
+
+```bash
+pip install -e ".[dev]"
+python -m pytest -q
+python scripts/smoke_test.py
+```
+
+涉及 benchmark/harness 时，至少运行：
+
+```bash
+python -m pytest tests/test_day1.py tests/test_day6.py tests/test_sandbox.py -q
 ```

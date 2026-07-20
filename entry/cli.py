@@ -305,6 +305,14 @@ def _execute_run(
     runtime = create_runtime(sandbox=sandbox, repo_path=str(repo_path)) if sandbox else None
     if sandbox and show_banner:
         click.echo(dim(f"  Sandbox: Docker ({runtime.name})"))
+    if sandbox and runtime is not None:
+        # Eagerly warm the sandbox so verification doesn't pay the first-container
+        # startup cost late in the run and so Docker issues fail fast.
+        warmup = runtime.exec("pwd", cwd=str(repo_path), timeout=15)
+        if not warmup.success:
+            click.echo(red(f"Error: failed to initialize sandbox: {warmup.output or warmup.stderr}"), err=True)
+            runtime.cleanup()
+            raise click.Abort()
     registry = _build_registry(config, confirm_callback=confirm_cb, runtime=runtime)
 
     from agent.core import Agent, AgentConfig
@@ -553,7 +561,7 @@ def run(
 
     from agent.benchmark import build_run_manifest
     manifest = build_run_manifest(
-        task_id="adhoc-run",
+        task_id=f"adhoc-{uuid.uuid4().hex[:8]}",
         task_file=task_file,
         task_repo=repo_path,
         source_repo=repo_path,
@@ -1474,7 +1482,7 @@ def _render_benchmark_compare_markdown(comparison: dict) -> str:
                 f"{item.get('failure_type') or '-'} | "
                 f"{item.get('failure_stage') or '-'} | "
                 f"{_markdown_cell(item.get('failure_message'))} | "
-                f"{f'`{Path(item['patch_path']).name}`' if item.get('patch_path') else '-'} | "
+                f"{_markdown_patch_link(item.get('patch_path'))} | "
                 f"`{Path(item['artifact_dir']).name}` |"
                 for item in right_runs
             ],
@@ -1589,7 +1597,7 @@ def _render_benchmark_summary_markdown(summary: dict) -> str:
                 f"{_markdown_cell(item.get('failure_message'))} | "
                 f"{_markdown_path_cell(item.get('repo_source'))} | "
                 f"{_markdown_path_cell(item.get('workspace_repo'))} | "
-                f"{f'`{Path(item['patch_path']).name}`' if item.get('patch_path') else '-'} | "
+                f"{_markdown_patch_link(item.get('patch_path'))} | "
                 f"`{Path(item['artifact_dir']).name}` |"
                 for item in summary.get("runs", [])
             ],
@@ -1657,6 +1665,15 @@ def _markdown_path_cell(value: object) -> str:
     if value is None:
         return "-"
     return f"`{_markdown_cell(value)}`"
+
+
+def _markdown_patch_link(value: object) -> str:
+    if value is None:
+        return "-"
+    path = Path(str(value))
+    label = _markdown_cell(path.name)
+    target = str(path).replace(" ", "%20").replace("(", "%28").replace(")", "%29")
+    return f"[{label}]({target})"
 
 
 # ---------------------------------------------------------------------------

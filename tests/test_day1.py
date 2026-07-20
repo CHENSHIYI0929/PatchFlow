@@ -592,7 +592,12 @@ class TestArtifactExport:
             log,
             result,
             elapsed_seconds=0.5,
-            manifest={"run_id": "abc", "workspace_repo": "/tmp/workspace"},
+            manifest={
+                "run_id": "abc",
+                "workspace_repo": "/tmp/workspace",
+                "run_started_at": None,
+                "run_finished_at": None,
+            },
         )
 
         manifest = json.loads((artifact_dir / "run_manifest.json").read_text())

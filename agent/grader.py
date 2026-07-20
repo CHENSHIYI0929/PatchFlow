@@ -116,21 +116,26 @@ class CompositeGrader(Grader):
         timeout: int = 120,
     ) -> GraderResult:
         checks: list[dict[str, Any]] = []
+        failures: list[GraderResult] = []
         for grader in self.graders:
             result = grader.run(repo_path, runtime=runtime, timeout=timeout)
             checks.extend(result.checks or [result.to_dict()])
             if not result.success:
-                return GraderResult(
-                    name=self.name,
-                    success=False,
-                    stage=result.stage,
-                    failure_type=result.failure_type,
-                    message=f"{grader.name}: {result.message}",
-                    command=result.command,
-                    output=result.output,
-                    returncode=result.returncode,
-                    checks=checks,
-                )
+                failures.append(result)
+
+        if failures:
+            first = failures[0]
+            return GraderResult(
+                name=self.name,
+                success=False,
+                stage=first.stage,
+                failure_type=first.failure_type,
+                message="; ".join(f"{item.name}: {item.message}" for item in failures),
+                command=first.command,
+                output="\n\n".join(item.output for item in failures if item.output),
+                returncode=first.returncode,
+                checks=checks,
+            )
 
         return GraderResult(
             name=self.name,

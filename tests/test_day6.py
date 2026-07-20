@@ -262,6 +262,30 @@ class TestCliRun:
         assert (artifact_dir / "metrics.json").exists()
         assert (artifact_dir / "events.json").exists()
 
+    def test_each_run_gets_a_unique_task_id(self, tmp_path):
+        from config.schema import AppConfig
+
+        captured_ids = []
+
+        class _Result:
+            def is_success(self):
+                return True
+
+        def fake_execute_run(*args, **kwargs):
+            captured_ids.append(kwargs["manifest"]["task_id"])
+            return _Result(), tmp_path / "artifact"
+
+        runner = CliRunner()
+        with patch("entry.cli.load_config", return_value=AppConfig()):
+            with patch("entry.cli._execute_run", side_effect=fake_execute_run):
+                first = runner.invoke(cli, ["run", "--repo", str(tmp_path), "--task", "one"], obj={})
+                second = runner.invoke(cli, ["run", "--repo", str(tmp_path), "--task", "two"], obj={})
+
+        assert first.exit_code == 0, first.output
+        assert second.exit_code == 0, second.output
+        assert len(set(captured_ids)) == 2
+        assert all(task_id.startswith("adhoc-") for task_id in captured_ids)
+
     def test_run_missing_task_fails(self, tmp_path):
         runner = CliRunner()
         result = runner.invoke(cli, ["run", "--repo", str(tmp_path)], obj={})
@@ -1234,6 +1258,58 @@ class TestBenchmarkTaskSpecs:
         assert result.failure_type == "timeout"
         assert "timed out" in result.message.lower()
 
+    def test_composite_grader_runs_all_checks(self, tmp_path):
+        from agent.grader import CommandGrader, CompositeGrader
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        grader = CompositeGrader([
+            CommandGrader("test", "python -c \"import sys; sys.exit(1)\""),
+            CommandGrader("lint", "python -c \"print('lint ok')\""),
+            CommandGrader("patch_policy", "python -c \"import sys; sys.exit(2)\""),
+        ])
+
+        result = grader.run(repo)
+
+        assert result.success is False
+        assert [check["name"] for check in result.checks] == ["test", "lint", "patch_policy"]
+        assert "test:" in result.message
+        assert "patch_policy:" in result.message
+
+    def test_markdown_patch_cell_is_clickable(self, tmp_path):
+        from entry.cli import _markdown_patch_link
+
+        patch_path = tmp_path / "artifact with spaces" / "final_diff.patch"
+        rendered = _markdown_patch_link(patch_path)
+
+        assert rendered.startswith("[final_diff.patch](")
+        assert "%20" in rendered
+
+    def test_sandbox_warmup_failure_cleans_up_runtime(self, tmp_path):
+        import click
+        from config.schema import AppConfig
+        from tools.runtime import RunResult as RuntimeRunResult
+
+        runtime = MagicMock()
+        runtime.name = "fake"
+        runtime.exec.return_value = RuntimeRunResult(returncode=1, stdout="", stderr="warmup failed")
+
+        with patch("entry.cli.create_backend_from_config", return_value=MagicMock()):
+            with patch("tools.runtime.create_runtime", return_value=runtime):
+                with pytest.raises(click.Abort):
+                    from entry.cli import _execute_run
+                    _execute_run(
+                        AppConfig(),
+                        tmp_path,
+                        "task",
+                        stream=False,
+                        confirm=False,
+                        sandbox=True,
+                        verbose=False,
+                    )
+
+        runtime.cleanup.assert_called_once()
+
     def test_preverified_benchmark_run_records_memory(self, tmp_path):
         from agent.benchmark import BenchmarkTaskSpec, try_preverify_task
 
@@ -1248,9 +1324,25 @@ class TestBenchmarkTaskSpecs:
             test_cmd="python -c \"print('ok')\"",
         )
 
-        preverified = try_preverify_task(spec, repo, log_dir=str(log_dir))
+        manifest = {
+            "run_id": "task-a-123",
+            "task_id": "task-a-123",
+            "task_repo": str(repo),
+        }
+        preverified = try_preverify_task(
+            spec,
+            repo,
+            log_dir=str(log_dir),
+            manifest=manifest,
+        )
 
         assert preverified is not None
+        result, artifact_dir = preverified
+        assert result.task_id == "task-a-123"
+        assert json.loads((artifact_dir / "result.json").read_text(encoding="utf-8"))["task_id"] == "task-a-123"
+        assert json.loads((artifact_dir / "run_manifest.json").read_text(encoding="utf-8"))["task_id"] == "task-a-123"
+        events = json.loads((artifact_dir / "events.json").read_text(encoding="utf-8"))
+        assert events[0]["payload"]["task"]["source_repo_path"] == str(repo)
         memory_path = log_dir / "memory" / "run_memory.jsonl"
         rows = [json.loads(line) for line in memory_path.read_text(encoding="utf-8").splitlines()]
         assert rows[-1]["status"] == "success"

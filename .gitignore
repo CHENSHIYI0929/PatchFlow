@@ -5,7 +5,11 @@ logs/
 __pycache__/
 *.pyc
 .DS_Store
+SWE-bench/
+swebench_runs/
+swebench_source_repos/
 .coverage
 htmlcov/
 dist/
 build/
+ablation_report.md

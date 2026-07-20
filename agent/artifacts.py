@@ -450,7 +450,9 @@ def _summarize_failure_trajectory(
                     step=item.get("step"),
                     tool=((item.get("action") or {}).get("tool_call") or {}).get("name")
                     or (item.get("action") or {}).get("action_type"),
-                    thought=((item.get("action") or {}).get("thought") or "").splitlines()[0][:120],
+                    thought=(
+                        ((((item.get("action") or {}).get("thought") or "").splitlines() or [""])[0])[:120]
+                    ),
                 )
                 for item in recent_actions
             ]
@@ -514,8 +516,10 @@ def _finalize_manifest(
 
     materialized = dict(manifest)
     if events:
-        materialized.setdefault("run_started_at", events[0].get("timestamp"))
-        materialized.setdefault("run_finished_at", events[-1].get("timestamp"))
+        if not materialized.get("run_started_at"):
+            materialized["run_started_at"] = events[0].get("timestamp")
+        if not materialized.get("run_finished_at"):
+            materialized["run_finished_at"] = events[-1].get("timestamp")
     return materialized
 
 

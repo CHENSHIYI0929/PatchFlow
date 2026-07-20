@@ -40,7 +40,7 @@ Status definitions:
 | `astropy__astropy-6938` | passed | Official report resolved |
 
 Official report:
-- [patchflow-deepseek-v4-flash.patchflow-lite5-official-retry12.json](/Users/chenshiyi/Downloads/PatchFlow/SWE-bench/patchflow-deepseek-v4-flash.patchflow-lite5-official-retry12.json)
+- [patchflow-deepseek-v4-flash.patchflow-lite5-official-retry12.json](../SWE-bench/patchflow-deepseek-v4-flash.patchflow-lite5-official-retry12.json)
 
 ### 2. `django_4_official`
 
@@ -52,7 +52,7 @@ Official report:
 | `django__django-11049` | passed | Official report resolved |
 
 Official report:
-- [patchflow-deepseek-v4-flash.patchflow-django4-official.json](/Users/chenshiyi/Downloads/PatchFlow/SWE-bench/patchflow-deepseek-v4-flash.patchflow-django4-official.json)
+- [patchflow-deepseek-v4-flash.patchflow-django4-official.json](../SWE-bench/patchflow-deepseek-v4-flash.patchflow-django4-official.json)
 
 ### 3. `next_requests_sympy_6`
 
@@ -136,11 +136,11 @@ These tasks were explored and partially adapted, but were not counted as normal 
 ## Artifact Locations
 
 - Official SWE-bench reports:
-  - [patchflow-deepseek-v4-flash.patchflow-lite5-official-retry12.json](/Users/chenshiyi/Downloads/PatchFlow/SWE-bench/patchflow-deepseek-v4-flash.patchflow-lite5-official-retry12.json)
-  - [patchflow-deepseek-v4-flash.patchflow-django4-official.json](/Users/chenshiyi/Downloads/PatchFlow/SWE-bench/patchflow-deepseek-v4-flash.patchflow-django4-official.json)
+  - [patchflow-deepseek-v4-flash.patchflow-lite5-official-retry12.json](../SWE-bench/patchflow-deepseek-v4-flash.patchflow-lite5-official-retry12.json)
+  - [patchflow-deepseek-v4-flash.patchflow-django4-official.json](../SWE-bench/patchflow-deepseek-v4-flash.patchflow-django4-official.json)
 - Local task sets:
-  - [lite_5](/Users/chenshiyi/Downloads/PatchFlow/swebench_runs/lite_5)
-  - [django_4_official](/Users/chenshiyi/Downloads/PatchFlow/swebench_runs/django_4_official)
-  - [next_requests_sympy_6](/Users/chenshiyi/Downloads/PatchFlow/swebench_runs/next_requests_sympy_6)
-  - [next_requests_pytest_8](/Users/chenshiyi/Downloads/PatchFlow/swebench_runs/next_requests_pytest_8)
-  - [next_sympy_8](/Users/chenshiyi/Downloads/PatchFlow/swebench_runs/next_sympy_8)
+  - [lite_5](../swebench_runs/lite_5)
+  - [django_4_official](../swebench_runs/django_4_official)
+  - [next_requests_sympy_6](../swebench_runs/next_requests_sympy_6)
+  - [next_requests_pytest_8](../swebench_runs/next_requests_pytest_8)
+  - [next_sympy_8](../swebench_runs/next_sympy_8)

@@ -30,6 +30,7 @@ Runtime 负责实际执行——本地 subprocess 或 Docker 容器。
 
 from __future__ import annotations
 
+import os
 import subprocess
 import logging
 import uuid
@@ -156,9 +157,9 @@ class LocalRuntime(Runtime):
 # DockerRuntime — Docker 沙箱
 # ---------------------------------------------------------------------------
 
-# 沙箱容器使用的 Docker 镜像
-# 包含 Python、git、常用工具，体积合理
-SANDBOX_IMAGE = "python:3.11-slim"
+# 沙箱容器使用的 Docker 镜像。
+# 可通过 PATCHFLOW_SANDBOX_IMAGE 覆盖，便于复用本地已缓存镜像、避免临时拉取。
+SANDBOX_IMAGE = os.getenv("PATCHFLOW_SANDBOX_IMAGE", "python:3.11-slim")
 
 # 容器内 repo 的挂载路径
 CONTAINER_WORKDIR = "/workspace"
@@ -195,6 +196,7 @@ class DockerRuntime(Runtime):
         self._extra_mounts = extra_mounts or []
         self._setup_cmds = setup_cmds or []
         self._container_id: str | None = None
+        self._allow_network = False
         # 容器名加随机后缀，避免冲突
         self._container_name = f"coding-agent-sandbox-{uuid.uuid4().hex[:8]}"
 
@@ -238,6 +240,8 @@ class DockerRuntime(Runtime):
                 container_cwd = cwd   # 可能是容器内的绝对路径
         else:
             container_cwd = CONTAINER_WORKDIR
+
+        cmd = self._rewrite_host_paths(cmd)
 
         docker_cmd = [
             "docker", "exec",
@@ -319,8 +323,9 @@ class DockerRuntime(Runtime):
             "--rm",                                     # 停止时自动删除
             "-v", f"{self._repo_path}:{CONTAINER_WORKDIR}",  # mount repo
             "--workdir", CONTAINER_WORKDIR,
-            "--network", "none",                        # 默认断网，更安全
         ]
+        if not self._allow_network:
+            run_args += ["--network", "none"]          # 默认断网，更安全
 
         # 额外 mount
         for host_path, container_path in self._extra_mounts:
@@ -333,12 +338,12 @@ class DockerRuntime(Runtime):
                 run_args,
                 capture_output=True,
                 text=True,
-                timeout=60,  # 拉镜像可能需要时间
+                timeout=120,  # 首次拉镜像/启动容器在低速网络下会更慢
             )
         except subprocess.TimeoutExpired:
             return RunResult(
                 returncode=-1, stdout="",
-                stderr="Timed out starting Docker container (60s). Is Docker running?",
+                stderr="Timed out starting Docker container (120s). Is Docker running?",
             )
 
         if proc.returncode != 0:
@@ -360,6 +365,13 @@ class DockerRuntime(Runtime):
                 )
 
         return None   # 成功
+
+    def _rewrite_host_paths(self, cmd: str) -> str:
+        """Translate mounted host paths to their container equivalents inside command strings."""
+        rewritten = cmd.replace(self._repo_path, CONTAINER_WORKDIR)
+        for host_path, container_path in self._extra_mounts:
+            rewritten = rewritten.replace(str(Path(host_path).resolve()), container_path)
+        return rewritten
 
     def install_requirements(self, requirements_file: str = "requirements.txt") -> RunResult:
         """
@@ -399,9 +411,25 @@ def create_runtime(
     if not repo_path:
         raise ValueError("repo_path is required when sandbox=True")
 
-    runtime = DockerRuntime(repo_path=repo_path, image=image)
+    project_root = Path(__file__).resolve().parent.parent
+    extra_mounts: list[tuple[str, str]] = []
+    if os.getenv("PATCHFLOW_SANDBOX_SHARE_PROJECT_ROOT", "0") == "1":
+        extra_mounts.append((str(project_root), str(project_root)))
+
+    setup_cmds: list[str] = []
+    if os.getenv("PATCHFLOW_SANDBOX_BOOTSTRAP") == "swebench_local":
+        setup_cmds = []
+
+    runtime = DockerRuntime(
+        repo_path=repo_path,
+        image=image,
+        extra_mounts=extra_mounts,
+        setup_cmds=setup_cmds,
+    )
     if network:
         # 允许网络时去掉 --network none
         runtime._allow_network = True  # DockerRuntime._start_container 检查此标志
+    elif os.getenv("PATCHFLOW_SANDBOX_ALLOW_NETWORK", "0") == "1":
+        runtime._allow_network = True
 
     return runtime

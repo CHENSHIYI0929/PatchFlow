@@ -146,8 +146,9 @@ def try_preverify_task(
     task = Task(
         description=spec.description,
         repo_path=str(repo),
-        source_repo_path=str(repo),
-        task_id=str(uuid.uuid4())[:8],
+        source_repo_path=(manifest or {}).get("task_repo") or str(repo),
+        task_id=(manifest or {}).get("task_id") or str(uuid.uuid4())[:8],
+        task_file=str(spec.path),
         task_category=spec.category,
         expected_failure_type=spec.expected_failure_type,
         test_cmd=default_test_cmd_for_spec(spec),
