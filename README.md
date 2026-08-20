@@ -14,6 +14,14 @@ PatchFlow 是一个可运行、可评测的 coding agent。它会探索代码库
 - FastAPI 服务、PostgreSQL 持久化、Redis worker 队列
 - MCP stdio / Streamable HTTP 工具适配
 
+## Benchmark 表现
+
+- 30 个 SWE-bench Lite 阶段性任务中完成 24 个有效修复
+- Astropy、Django 官方评测分别通过 4/5 和 4/4
+- 同模型、同任务的 15 项消融实验中，成功率由 93.3% 提升至 100%；在双方均成功的任务上，平均 Token 消耗降低 17.4%，Agent Steps 减少 9.7%
+
+详细结果见 [SWE-bench 评测](docs/benchmark_results_30.md)和[效率消融报告](docs/efficiency_ablation.md)。
+
 ## API 服务
 
 一键启动 API、worker、PostgreSQL 和 Redis：
@@ -139,8 +147,6 @@ skip_preverified: true
 `test_path` / `test_cmd` 会构造 `CommandGrader`；配置多个检查时使用 `CompositeGrader`，执行全部 test、lint、patch policy 并聚合结果。
 
 每个 benchmark task 都在独立 workspace 中运行，不污染源 fixture。运行结果包含 `failure_type`、`failure_stage`、`failure_message`，并写入 `run_manifest.json`。
-
-阶段性 SWE-bench Lite 结果见 [docs/benchmark_results_30.md](docs/benchmark_results_30.md)。
 
 ## 运行工件
 
