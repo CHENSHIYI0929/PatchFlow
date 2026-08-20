@@ -11,6 +11,49 @@ PatchFlow 是一个可运行、可评测的 coding agent。它会探索代码库
 - 长记忆与上下文压缩
 - Docker 沙箱和命令安全策略
 - benchmark grader、独立 workspace、失败分类、manifest 和对比报告
+- FastAPI 服务、PostgreSQL 持久化、Redis worker 队列
+- MCP stdio / Streamable HTTP 工具适配
+
+## API 服务
+
+一键启动 API、worker、PostgreSQL 和 Redis：
+
+```bash
+cp .env.example .env
+mkdir -p repos
+docker compose up --build
+```
+
+将待修改仓库放在 `repos/` 下，然后创建任务：
+
+```bash
+curl -X POST http://localhost:8000/v1/runs \
+  -H "Authorization: Bearer change-me" \
+  -H "Content-Type: application/json" \
+  -d '{"repo_path":"my-repo","task":"修复失败测试并验证"}'
+```
+
+主要接口：`POST /v1/runs`、`GET /v1/runs/{id}`、`GET /v1/runs/{id}/events`、
+`POST /v1/runs/{id}/cancel` 和 artifact 查询/下载接口。API 只允许访问
+`PATCHFLOW_REPO_ROOT` 内的仓库。
+
+排队任务会立即取消；运行中任务由 worker 父进程终止执行子进程。同一仓库同一时间
+只允许一个 run 修改，冲突任务会自动重新入队。
+
+MCP 工具通过 `integrations.mcp.register_mcp_tools()` 注册到现有 `ToolRegistry`，
+支持 stdio 和 Streamable HTTP transport，并自动映射为 `mcp__server__tool` 名称。
+
+也可在配置文件中自动注册：
+
+```yaml
+mcp:
+  servers:
+    project_tools:
+      transport: stdio
+      command: python
+      args: ["-m", "my_mcp_server"]
+      allowed_tools: ["search", "inspect"]
+```
 
 ## 快速开始
 

@@ -67,11 +67,30 @@ class ContextConfig:
 
 
 @dataclass
+class MCPServerConfig:
+    name: str
+    transport: str = "stdio"
+    command: str = ""
+    args: list[str] = field(default_factory=list)
+    url: str = ""
+    env: dict[str, str] = field(default_factory=dict)
+    headers: dict[str, str] = field(default_factory=dict)
+    allowed_tools: list[str] = field(default_factory=list)
+    enabled: bool = True
+
+
+@dataclass
+class MCPConfig:
+    servers: list[MCPServerConfig] = field(default_factory=list)
+
+
+@dataclass
 class AppConfig:
     llm: LLMConfig = field(default_factory=LLMConfig)
     agent: AgentCfg = field(default_factory=AgentCfg)
     tools: ToolsConfig = field(default_factory=ToolsConfig)
     context: ContextConfig = field(default_factory=ContextConfig)
+    mcp: MCPConfig = field(default_factory=MCPConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +145,7 @@ def _parse(data: dict[str, Any]) -> AppConfig:
     agent_raw = data.get("agent", {})
     tools_raw = data.get("tools", {})
     context_raw = data.get("context", {})
+    mcp_raw = data.get("mcp", {})
 
     llm = LLMConfig(
         provider=llm_raw.get("provider", "anthropic"),
@@ -161,7 +181,21 @@ def _parse(data: dict[str, Any]) -> AppConfig:
         long_memory_limit=int(context_raw.get("long_memory_limit", 5)),
     )
 
-    return AppConfig(llm=llm, agent=agent, tools=tools, context=context)
+    servers = []
+    for name, raw in (mcp_raw.get("servers", {}) or {}).items():
+        servers.append(MCPServerConfig(
+            name=name,
+            transport=str(raw.get("transport", "stdio")),
+            command=str(raw.get("command", "")),
+            args=[str(value) for value in raw.get("args", [])],
+            url=str(raw.get("url", "")),
+            env={str(key): str(value) for key, value in (raw.get("env", {}) or {}).items()},
+            headers={str(key): str(value) for key, value in (raw.get("headers", {}) or {}).items()},
+            allowed_tools=[str(value) for value in raw.get("allowed_tools", [])],
+            enabled=bool(raw.get("enabled", True)),
+        ))
+
+    return AppConfig(llm=llm, agent=agent, tools=tools, context=context, mcp=MCPConfig(servers))
 
 
 def merge_cli_overrides(

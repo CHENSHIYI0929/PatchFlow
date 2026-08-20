@@ -5,6 +5,9 @@ logs/
 __pycache__/
 *.pyc
 .DS_Store
+.env
+patchflow.db
+repos/
 SWE-bench/
 swebench_runs/
 swebench_source_repos/

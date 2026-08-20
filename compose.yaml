@@ -1,0 +1,76 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    command: uvicorn service.api:app --host 0.0.0.0 --port 8000
+    environment: &patchflow-env
+      PATCHFLOW_DATABASE_URL: postgresql+psycopg://patchflow:patchflow@postgres:5432/patchflow
+      PATCHFLOW_REDIS_URL: redis://redis:6379/0
+      PATCHFLOW_REPO_ROOT: /workspace/repos
+      PATCHFLOW_ARTIFACT_ROOT: /data/logs/artifacts
+      PATCHFLOW_API_TOKEN: ${PATCHFLOW_API_TOKEN:-}
+      PATCHFLOW_TASK_TIMEOUT_SECONDS: ${PATCHFLOW_TASK_TIMEOUT_SECONDS:-900}
+      SILICONFLOW_API_KEY: ${SILICONFLOW_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./repos:/workspace/repos
+      - patchflow_data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    command: python -m service.worker
+    environment: *patchflow-env
+    volumes:
+      - ./repos:/workspace/repos
+      - patchflow_data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: patchflow
+      POSTGRES_USER: patchflow
+      POSTGRES_PASSWORD: patchflow
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U patchflow -d patchflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  patchflow_data:
+  postgres_data:
+  redis_data:

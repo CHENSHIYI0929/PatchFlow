@@ -9,18 +9,25 @@ description = "A general-purpose coding agent supporting Claude, OpenAI, DeepSee
 requires-python = ">=3.11"
 dependencies = [
     "anthropic>=0.30.0",
+    "fastapi>=0.115.0",
     "openai>=1.30.0",
     "click>=8.1.0",
+    "mcp>=1.0.0",
+    "psycopg[binary]>=3.2.0",
+    "redis>=5.0.0",
     "rich>=13.0.0",
+    "sqlalchemy>=2.0.0",
     "pyyaml>=6.0",
     "tree-sitter>=0.22.0",
     "tree-sitter-python>=0.22.0",
     "PyGithub>=2.3.0",
     "gitpython>=3.1.0",
+    "uvicorn>=0.30.0",
 ]
 
 [project.optional-dependencies]
 dev = [
+    "httpx>=0.27.0",
     "pytest>=8.0.0",
     "pytest-cov>=5.0.0",
 ]
@@ -38,7 +45,7 @@ agent = "entry.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["agent*", "llm*", "tools*", "context*", "entry*", "config*"]
+include = ["agent*", "llm*", "tools*", "context*", "entry*", "config*", "service*", "integrations*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

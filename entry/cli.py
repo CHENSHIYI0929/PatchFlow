@@ -81,6 +81,10 @@ class TaskTimeoutError(TimeoutError):
         self.elapsed_seconds = elapsed_seconds
 
 
+class TaskCancelledError(RuntimeError):
+    """Raised when a parent process cancels an active task worker."""
+
+
 def _benchmark_run_worker(result_queue, progress_queue, payload: dict) -> None:
     """Run a single benchmark task in a child process."""
     try:
@@ -98,7 +102,7 @@ def _benchmark_run_worker(result_queue, progress_queue, payload: dict) -> None:
         })
 
 
-def _execute_run_with_task_timeout(seconds: int | None, payload: dict):
+def _execute_run_with_task_timeout(seconds: int | None, payload: dict, *, cancel_check=None):
     """Execute one benchmark task, using a worker process when a hard timeout is configured."""
     if not seconds or seconds <= 0:
         return _execute_run(**payload)
@@ -114,6 +118,19 @@ def _execute_run_with_task_timeout(seconds: int | None, payload: dict):
     start = time.time()
     latest_progress: dict | None = None
 
+    def stop_worker() -> None:
+        process.terminate()
+        process.join(5)
+        if process.is_alive() and hasattr(process, "kill"):
+            process.kill()
+            process.join(1)
+
+    def close_queues() -> None:
+        result_queue.cancel_join_thread()
+        result_queue.close()
+        progress_queue.cancel_join_thread()
+        progress_queue.close()
+
     while True:
         try:
             while True:
@@ -124,12 +141,13 @@ def _execute_run_with_task_timeout(seconds: int | None, payload: dict):
         process.join(0.2)
         if not process.is_alive():
             break
+        if cancel_check is not None and cancel_check():
+            stop_worker()
+            close_queues()
+            raise TaskCancelledError("Run cancelled by request")
         if time.time() - start >= seconds:
-            process.terminate()
-            process.join(5)
-            if process.is_alive() and hasattr(process, "kill"):
-                process.kill()
-                process.join(1)
+            stop_worker()
+            close_queues()
             raise TaskTimeoutError(
                 f"Timed out after {seconds}s",
                 partial_progress=latest_progress,
@@ -170,7 +188,7 @@ def _build_registry(cfg, confirm_callback=None, runtime=None):
     from tools.shell_tool import ShellTool
     from tools.test_tool import PytestTool
 
-    return (
+    registry = (
         ToolRegistry()
         .register(ShellTool(confirm_callback=confirm_callback, runtime=runtime))
         .register(FileReadTool())
@@ -188,6 +206,23 @@ def _build_registry(cfg, confirm_callback=None, runtime=None):
         .register(GitAddTool(runtime=runtime))
         .register(GitCommitTool(runtime=runtime))
     )
+    for server in getattr(getattr(cfg, "mcp", None), "servers", []):
+        if not server.enabled:
+            continue
+        from integrations.mcp import StdioMCPClient, StreamableHTTPMCPClient, register_mcp_tools
+        if server.transport == "stdio":
+            client = StdioMCPClient(server.command, server.args, server.env or None)
+        elif server.transport in {"http", "streamable_http"}:
+            client = StreamableHTTPMCPClient(server.url, server.headers or None)
+        else:
+            raise ValueError(f"Unsupported MCP transport: {server.transport}")
+        register_mcp_tools(
+            registry,
+            server.name,
+            client,
+            allowed_tools=set(server.allowed_tools) if server.allowed_tools else None,
+        )
+    return registry
 
 
 def _print_step(event) -> None:

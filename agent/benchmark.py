@@ -338,6 +338,15 @@ def build_run_manifest(
             "budget_tokens": getattr(getattr(config, "agent", None), "budget_tokens", None),
         },
         "grader_config": grader.describe() if grader else None,
+        "mcp_servers": [
+            {
+                "name": server.name,
+                "transport": server.transport,
+                "allowed_tools": list(server.allowed_tools),
+            }
+            for server in getattr(getattr(config, "mcp", None), "servers", [])
+            if server.enabled
+        ],
         "code_version": _detect_code_version(),
         "platform": platform.platform(),
         "python_version": platform.python_version(),

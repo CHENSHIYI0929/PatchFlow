@@ -23,3 +23,7 @@ context:
   enable_compression: true # 超出窗口时压缩旧上下文而不是直接丢弃
   enable_long_memory: true # 从 logs/memory/run_memory.jsonl 检索相关经验
   long_memory_limit: 5 # 每次最多注入几条长期记忆
+
+# MCP servers are optional. See README.md for stdio and HTTP examples.
+mcp:
+  servers: {}
